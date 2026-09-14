@@ -42,3 +42,61 @@ def test_full_request_round_trips() -> None:
     dumped = req.model_dump(mode="json")
     assert dumped["intent"] == "book"
     assert dumped["resolved_date"] == "2026-09-22"
+
+
+# --- candidate_intents normalization (architecture review, Finding 1) ---
+
+
+def test_candidate_intents_kept_when_ambiguous_with_two_distinct() -> None:
+    req = InterpretedRequest(
+        intent=Intent.BOOK,
+        is_ambiguous=True,
+        candidate_intents=[Intent.BOOK, Intent.QUESTION],
+        confidence=0.5,
+    )
+    assert req.candidate_intents == [Intent.BOOK, Intent.QUESTION]
+
+
+def test_candidate_intents_nulled_when_not_ambiguous() -> None:
+    # Even if the model mistakenly supplies candidates on a non-ambiguous
+    # read, they're not meaningful -- is_ambiguous is the gate.
+    req = InterpretedRequest(
+        intent=Intent.BOOK,
+        is_ambiguous=False,
+        candidate_intents=[Intent.BOOK, Intent.QUESTION],
+        confidence=0.9,
+    )
+    assert req.candidate_intents is None
+
+
+def test_candidate_intents_nulled_when_single_entry() -> None:
+    # A one-item "fork" isn't a fork -- that's just `intent` itself.
+    req = InterpretedRequest(
+        intent=Intent.BOOK, is_ambiguous=True, candidate_intents=[Intent.BOOK], confidence=0.4
+    )
+    assert req.candidate_intents is None
+
+
+def test_candidate_intents_deduped() -> None:
+    req = InterpretedRequest(
+        intent=Intent.BOOK,
+        is_ambiguous=True,
+        candidate_intents=[Intent.BOOK, Intent.BOOK, Intent.QUESTION],
+        confidence=0.4,
+    )
+    assert req.candidate_intents == [Intent.BOOK, Intent.QUESTION]
+
+
+def test_candidate_intents_nulled_when_dedup_leaves_one() -> None:
+    req = InterpretedRequest(
+        intent=Intent.BOOK,
+        is_ambiguous=True,
+        candidate_intents=[Intent.BOOK, Intent.BOOK],
+        confidence=0.4,
+    )
+    assert req.candidate_intents is None
+
+
+def test_candidate_intents_none_by_default() -> None:
+    req = InterpretedRequest(intent=Intent.BOOK, is_ambiguous=True, confidence=0.4)
+    assert req.candidate_intents is None

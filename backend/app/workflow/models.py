@@ -28,6 +28,7 @@ class ProcessingRunState(str, enum.Enum):
 
     RECEIVED = "RECEIVED"
     INTERPRETING = "INTERPRETING"
+    AWAITING_CLARIFICATION = "AWAITING_CLARIFICATION"
     SLOTS_OFFERED = "SLOTS_OFFERED"
     AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
     BOOKING = "BOOKING"
@@ -81,6 +82,17 @@ class ProcessingRun(Base):
     # is {"staff_id", "start_at", "end_at"}; re-validated deterministically
     # against real availability at confirm time regardless of what's here.
     offered_slots: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # How many clarifying questions have been asked, capped at
+    # MAX_CLARIFICATION_ROUNDS in orchestrator.py -- still ambiguous past
+    # the cap escalates rather than looping indefinitely.
+    clarification_rounds: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    # The bounded conversation transcript: [{"role", "content", "at"}, ...].
+    # Working/operational data, not a business record -- same shorter-
+    # retention register as WorkflowStep (Concern 6), not AuditEvent. Lives
+    # and dies with this run; no copy of it exists anywhere else. No purge
+    # job exists yet -- that lands with Phase 6's background-job sweep,
+    # which will also own expiring abandoned AWAITING_CLARIFICATION runs.
+    messages: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     resulting_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("appointments.id", ondelete="SET NULL"), nullable=True
     )
@@ -138,6 +150,10 @@ class AIInvocation(Base):
     time_preference: Mapped[str | None] = mapped_column(String(200), nullable=True)
     is_ambiguous: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
     ambiguity_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # List of Intent values (as strings), populated only for a genuine
+    # small fork (e.g. ["book", "question"]) -- see architecture review,
+    # Finding 1.
+    candidate_intents: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     confidence: Mapped[float] = mapped_column(sa.Float, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(

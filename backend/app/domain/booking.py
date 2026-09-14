@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain import availability
@@ -40,6 +40,19 @@ from app.domain.models import (
     staff_services,
 )
 from app.domain.schemas import BookingRequest
+
+# Postgres SQLSTATE codes for the races this function's transaction can
+# lose: 23P01 exclusion_violation (the exclusion constraint rejected a
+# genuine overlap), 40P01 deadlock_detected and 40001 serialization_failure
+# (Postgres aborted this transaction to resolve a conflict with another
+# one contending for the same GiST index range -- a real, if infrequent,
+# way two truly simultaneous booking attempts can collide). All three mean
+# the same thing to the caller: this attempt didn't book, try again.
+# Checked by SQLSTATE rather than exception subclass because the asyncpg
+# driver's SQLAlchemy translation layer doesn't consistently map deadlock
+# down to a typed subclass (it falls through to the generic DBAPIError) --
+# SQLSTATE is the driver-independent, authoritative signal.
+_RETRYABLE_BOOKING_SQLSTATES = frozenset({"23P01", "40P01", "40001"})
 
 
 async def _get_or_404(db: AsyncSession, model: type, entity_id: UUID, name: str):
@@ -98,12 +111,21 @@ async def book_appointment(
     db.add(appointment)
     try:
         await db.commit()
-    except IntegrityError as exc:
+    except DBAPIError as exc:
         await db.rollback()
-        # Either the exclusion constraint caught a genuine race on the slot,
-        # or a concurrent request landed with the same idempotency key
-        # first. Distinguish and respond cleanly rather than surfacing a
-        # raw database error to the caller.
+        sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        if sqlstate not in _RETRYABLE_BOOKING_SQLSTATES:
+            # Not a race this function knows how to interpret -- a
+            # connection failure, a syntax error, anything else -- so
+            # don't reinterpret it as "slot unavailable"; let it propagate
+            # as the real, unexpected database error it is.
+            raise
+        # Either a genuine slot conflict, or a concurrent request landing
+        # with the same idempotency key first. Distinguish and respond
+        # cleanly rather than surfacing a raw database error to the caller
+        # -- the workflow orchestrator already knows how to react to
+        # SlotUnavailableError by re-checking and re-offering fresh
+        # availability.
         again = await db.scalar(
             select(Appointment).where(Appointment.idempotency_key == request.idempotency_key)
         )

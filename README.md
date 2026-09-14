@@ -17,13 +17,14 @@ Architecture proposed and reviewed; implementation in progress.
 - [x] Phase 0 — repo, tooling, Docker Compose, CI, security baseline
 - [x] Phase 1 — domain core: schema, deterministic availability engine, atomic booking
 - [x] Phase 2 — AI interpretation layer + golden-set evaluation
-- [x] **Phase 3** — workflow engine, audit trail, notification interface
-- [ ] Phase 4 — calendar provider abstraction (mock + Google Calendar)
-- [ ] Phase 5 — background jobs: reminders, no-show detection, recovery
-- [ ] Phase 6 — cancellation & rescheduling
-- [ ] Phase 7 — real notification provider
-- [ ] Phase 8 — dashboard
-- [ ] Phase 9 — security hardening, full evaluation suite, deployment
+- [x] Phase 3 — workflow engine, audit trail, notification interface
+- [x] **Phase 4** — customer web chat (bounded clarification loop + thin chat UI)
+- [ ] Phase 5 — calendar provider abstraction (mock + Google Calendar)
+- [ ] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
+- [ ] Phase 7 — cancellation & rescheduling
+- [ ] Phase 8 — real notification provider
+- [ ] Phase 9 — business dashboard
+- [ ] Phase 10 — security hardening, full evaluation suite, deployment
 
 Phase 1 detail: `app/domain/` holds the business/service/staff/customer/
 appointment schema, the deterministic availability engine (working hours,
@@ -72,14 +73,61 @@ offer and confirm, the workflow re-offers fresh availability instead of
 just failing (`tests/workflow/test_orchestrator.py`, the re-offer race
 test). `NotificationService` (Protocol + `MockNotificationProvider`) is
 the vendor boundary for confirmations — a real provider arrives in Phase
-7 as a new module, not new call sites. `GET /v1/requests/{id}/trace`
+8 as a new module, not new call sites. `GET /v1/requests/{id}/trace`
 answers "what happened to this request?" directly from these tables — no
 separate tracing stack.
+
+Phase 4 detail: extends Phase 3's `ProcessingRun` state machine with one
+new state, `AWAITING_CLARIFICATION` (`INTERPRETING` is the hub state,
+reached fresh or via a clarification reply — the post-interpretation
+routing decision always happens from the same place). Bounded, not an
+open-ended chatbot: at most 2 clarification rounds
+(`orchestrator.MAX_CLARIFICATION_ROUNDS`) before escalating rather than
+looping — the same cap the original architecture proposal specified for
+ambiguous requests. The AI's existing `ambiguity_reason` field doubles as
+the clarifying question, so Phase 2's contract needed no changes. A
+bounded transcript (`ProcessingRun.messages`, JSONB — operational data,
+same shorter-retention register as `WorkflowStep`, not a permanent
+record; no purge job yet, landing with Phase 6's sweep) carries context
+across turns without a new conversation-domain concept. First-time
+customer identification (`app/domain/customers.py`,
+`find_or_create_customer`) resolves a name+contact into a `Customer` row
+with no account system — any channel can use it, not just chat. The chat
+UI itself (`static/chat/`, mounted at `/chat`) is a single static HTML
+file with inline CSS/JS — no framework, no build step, and no
+booking/availability logic; it only calls `POST /v1/requests`, `POST
+/v1/requests/{id}/reply`, and `POST /v1/requests/{id}/confirm`. Slot
+selection is button-based, not free-text-parsed — deterministic UI
+selection where a language-understanding step isn't needed.
+`app/api/rate_limit.py` adds a minimal in-memory per-IP limiter on the
+two AI-invoking public endpoints (real production rate limiting is
+Phase 10 hardening scope; this exists because Phase 4 is what first
+exposes a public, unauthenticated, AI-calling endpoint).
+
+Verified live against the real API (kept minimal, per the same budget
+discipline as Phase 2): one full conversation exercised end to end
+through the actual browser UI — an initial message correctly resolved to
+a missing-service escalation, then a second conversation's ambiguous
+"no date given" case correctly triggered a clarifying question, a reply
+resolved it, real slots were offered, and a real booking was confirmed.
+`pytest` itself never calls the real API — all 47 tests use
+`FakeInterpreter` or small purpose-built stubs.
+
+**Finding worth noting**: live testing surfaced that Phase 2's system
+prompt frames ambiguity around missing/vague *dates*, not around
+book-vs-question *intent* ambiguity — a message like "Can I come Friday?"
+resolved confidently to a booking request with no service mentioned
+(and correctly escalated for that reason) rather than being flagged as
+possibly-a-question. Also, the AI's `ambiguity_reason` field, reused
+directly as the clarifying question shown to the customer, reads like an
+internal diagnostic note rather than natural chat copy. Both are prompt/
+copy tuning opportunities for a follow-up, not defects in this phase's
+mechanism, which is verified working correctly end to end.
 
 ## Stack
 
 FastAPI · PostgreSQL · SQLAlchemy (async) · Alembic · Docker Compose ·
-GitHub Actions · Anthropic Claude (Phase 2+) · Next.js (Phase 8+)
+GitHub Actions · Anthropic Claude (Phase 2+) · Next.js (Phase 9+)
 
 ## Local development
 

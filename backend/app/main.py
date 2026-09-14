@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from app.api.routes import router as domain_router
@@ -10,6 +11,12 @@ app = FastAPI(title="Appointment Lifecycle Automation", version="0.1.0")
 app.include_router(domain_router, prefix="/v1", tags=["domain"])
 app.include_router(ai_router, prefix="/v1", tags=["ai"])
 app.include_router(workflow_router, prefix="/v1", tags=["workflow"])
+
+# The thin customer-facing chat channel (Phase 4). Static HTML/CSS/JS --
+# no framework, no build step -- calling the same /v1/requests, /reply,
+# and /confirm endpoints any other channel adapter would. Visit
+# /chat/?business_id=<uuid>.
+app.mount("/chat", StaticFiles(directory="static/chat", html=True), name="chat")
 
 
 @app.get("/health")

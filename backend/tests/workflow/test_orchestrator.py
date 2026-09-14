@@ -116,25 +116,11 @@ async def test_start_request_escalates_non_book_intent(
     assert "escalated" in steps
 
 
-@pytest.mark.asyncio
-async def test_start_request_escalates_ambiguous_book_request(
-    db: AsyncSession, business: Business, customer: Customer
-) -> None:
-    stub = _StubInterpreter(
-        InterpretedRequest(
-            intent=Intent.BOOK, is_ambiguous=True, ambiguity_reason="no date given", confidence=0.3
-        )
-    )
-    payload = StartRequestIn(
-        business_id=business.id, customer_id=customer.id, message="I'd like to come in sometime"
-    )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
-
-    assert run.state == ProcessingRunState.ESCALATED
-    case = (
-        await db.execute(select(EscalationCase).where(EscalationCase.processing_run_id == run.id))
-    ).scalar_one()
-    assert case.reason == "no date given"
+# An ambiguous BOOK request now asks one bounded clarifying question
+# rather than escalating immediately -- see tests/workflow/test_clarification.py
+# for that behavior (test_ambiguous_request_asks_one_clarifying_question
+# and test_still_ambiguous_after_cap_escalates for the eventual escalation
+# once the clarification cap is exhausted).
 
 
 @pytest.mark.asyncio

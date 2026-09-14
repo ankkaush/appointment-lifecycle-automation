@@ -11,7 +11,15 @@ from app.workflow.models import ProcessingRunState as S
 
 TRANSITIONS: dict[S, frozenset[S]] = {
     S.RECEIVED: frozenset({S.INTERPRETING}),
-    S.INTERPRETING: frozenset({S.SLOTS_OFFERED, S.ESCALATED, S.FAILED}),
+    # INTERPRETING is the hub state reached either fresh from RECEIVED or
+    # after a clarification reply (AWAITING_CLARIFICATION -> INTERPRETING)
+    # -- the post-interpretation routing decision (offer / clarify /
+    # escalate) always happens from here, one place, regardless of entry.
+    S.INTERPRETING: frozenset({S.SLOTS_OFFERED, S.AWAITING_CLARIFICATION, S.ESCALATED, S.FAILED}),
+    # Bounded: capped at MAX_CLARIFICATION_ROUNDS in orchestrator.py, not
+    # an open-ended loop. EXPIRED is for a future background-job sweep
+    # (Phase 6) of abandoned conversations -- not wired to a timer yet.
+    S.AWAITING_CLARIFICATION: frozenset({S.INTERPRETING, S.EXPIRED}),
     S.SLOTS_OFFERED: frozenset({S.AWAITING_CONFIRMATION, S.ESCALATED}),
     S.AWAITING_CONFIRMATION: frozenset({S.BOOKING, S.EXPIRED}),
     # BOOKING -> SLOTS_OFFERED is the re-offer path: the chosen slot was

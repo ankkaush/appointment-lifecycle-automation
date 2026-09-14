@@ -1,8 +1,9 @@
 """The workflow orchestrator: the one place that composes app.domain and
-app.ai into the actual request -> interpretation -> availability -> offer
--> confirm -> book lifecycle. Domain and ai stay independent of each other
-and of this module; this module depends on both, plus the Interpreter and
-NotificationService Protocols -- never a vendor SDK directly.
+app.ai into the actual request -> interpretation -> [clarification] ->
+availability -> offer -> confirm -> book lifecycle. Domain and ai stay
+independent of each other and of this module; this module depends on
+both, plus the Interpreter and NotificationService Protocols -- never a
+vendor SDK directly.
 """
 
 from __future__ import annotations
@@ -20,9 +21,11 @@ from app.ai.interpreter import Interpreter
 from app.ai.resolve import match_known_service
 from app.ai.schemas import Intent
 from app.domain import availability, booking
+from app.domain.customers import find_or_create_customer
 from app.domain.exceptions import DomainError, SlotUnavailableError
 from app.domain.models import Business, Customer, Service, StaffResource, staff_services
 from app.domain.schemas import BookingRequest
+from app.workflow.clarify import derive_clarifying_question
 from app.workflow.exceptions import (
     InvalidSlotChoiceError,
     ProcessingRunNotFoundError,
@@ -42,6 +45,11 @@ from app.workflow.state_machine import validate_transition
 
 MAX_OFFERED_SLOTS = 3
 DEFAULT_SEARCH_DAYS = 7
+# Bounded, not an open-ended chatbot: at most this many clarifying
+# questions before we stop guessing and hand off to a human. Matches the
+# architecture proposal's original exception-path language for ambiguous
+# requests, not a new number invented for chat.
+MAX_CLARIFICATION_ROUNDS = 2
 
 
 @dataclass(frozen=True)
@@ -81,6 +89,23 @@ async def _escalate(db: AsyncSession, run: ProcessingRun, reason: str) -> None:
     await _log_step(db, run, "escalated", {"reason": reason})
     db.add(EscalationCase(processing_run_id=run.id, reason=reason))
     await db.commit()
+
+
+def _append_message(run: ProcessingRun, role: str, content: str, now: datetime) -> None:
+    entry = {"role": role, "content": content, "at": now.isoformat()}
+    run.messages = [*(run.messages or []), entry]
+
+
+def _render_transcript(messages: list[dict]) -> str:
+    """Flattens the bounded conversation into one string for the existing
+    single-message Interpreter Protocol (app.ai.interpreter, Phase 2 --
+    unchanged). Keeping the Protocol's signature untouched is deliberate:
+    multi-turn framing is this orchestrator's concern, not the AI layer's."""
+    lines = []
+    for m in messages:
+        label = "Customer" if m["role"] == "customer" else "Assistant (clarifying)"
+        lines.append(f"{label}: {m['content']}")
+    return "\n".join(lines)
 
 
 def _day_window(day: date, tz: ZoneInfo) -> tuple[datetime, datetime]:
@@ -187,35 +212,12 @@ async def _offer_slots_or_escalate(
     return True
 
 
-async def start_request(
-    db: AsyncSession,
-    payload: StartRequestIn,
-    *,
-    interpreter: Interpreter,
-    now: datetime | None = None,
-) -> ProcessingRun:
-    now = now or datetime.now(UTC)
-
-    business = await db.get(Business, payload.business_id)
-    if business is None:
-        raise DomainError(f"Business {payload.business_id} not found")
-
-    run = ProcessingRun(
-        business_id=payload.business_id,
-        customer_id=payload.customer_id,
-        raw_message=payload.message,
-        state=ProcessingRunState.RECEIVED,
-    )
-    db.add(run)
-    await db.flush()
-    await _log_step(db, run, "received")
-    await _transition(db, run, ProcessingRunState.INTERPRETING)
-
-    known_services = list(
+async def _known_services(db: AsyncSession, business_id: UUID) -> list[str]:
+    return list(
         (
             await db.execute(
                 select(Service.name).where(
-                    Service.business_id == business.id, Service.active.is_(True)
+                    Service.business_id == business_id, Service.active.is_(True)
                 )
             )
         )
@@ -223,15 +225,33 @@ async def start_request(
         .all()
     )
 
+
+async def _interpret_and_route(
+    db: AsyncSession,
+    run: ProcessingRun,
+    business: Business,
+    known_services: list[str],
+    message: str,
+    interpreter: Interpreter,
+    now: datetime,
+) -> None:
+    """Shared by start_request (first message) and reply_to_clarification
+    (a follow-up): append the message, interpret the full transcript so
+    far, then route to slots-offered / a bounded clarifying question /
+    escalation. The one place this decision is made, regardless of which
+    turn of the conversation triggered it.
+    """
+    _append_message(run, "customer", message, now)
+    transcript = _render_transcript(run.messages)
+
     try:
         outcome = await interpreter.interpret(
-            payload.message, today=now.date(), known_services=known_services
+            transcript, today=now.date(), known_services=known_services
         )
     except AIInterpretationError as exc:
         await _transition(db, run, ProcessingRunState.FAILED, reason=str(exc))
         await _log_step(db, run, "interpretation_failed", {"error": str(exc)})
-        await db.commit()
-        return run
+        return
 
     req = outcome.request
     db.add(
@@ -249,6 +269,9 @@ async def start_request(
             time_preference=req.time_preference,
             is_ambiguous=req.is_ambiguous,
             ambiguity_reason=req.ambiguity_reason,
+            candidate_intents=(
+                [i.value for i in req.candidate_intents] if req.candidate_intents else None
+            ),
             confidence=req.confidence,
         )
     )
@@ -256,29 +279,58 @@ async def start_request(
         db, run, "interpreted", {"intent": req.intent.value, "confidence": req.confidence}
     )
 
-    # Phase 3 automates the booking path only -- cancel/reschedule get
-    # their own deterministic policy handling in Phase 6. Anything else
-    # is a clean, honest escalation rather than a half-implemented guess.
+    # Ambiguity that still plausibly means BOOK -- either the model
+    # committed to intent=book with missing detail, or it flagged BOOK as
+    # one of a small set of candidate intents (architecture review,
+    # Finding 1) -- gets a bounded clarifying question. Anything else
+    # ambiguous (confident non-BOOK, or no coherent candidates at all)
+    # falls through to the same honest escalation as a confident non-BOOK
+    # intent: Phase 3 automates the booking path only, and clarification
+    # stays scoped to it.
+    book_is_candidate = req.intent == Intent.BOOK or (
+        req.candidate_intents is not None and Intent.BOOK in req.candidate_intents
+    )
+
+    if req.is_ambiguous and book_is_candidate:
+        if run.clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
+            await _escalate(
+                db,
+                run,
+                f"still ambiguous after {MAX_CLARIFICATION_ROUNDS} clarification rounds: "
+                f"{req.ambiguity_reason}",
+            )
+            return
+
+        question = derive_clarifying_question(req)
+        run.clarification_rounds += 1
+        _append_message(run, "assistant", question, now)
+        await _transition(db, run, ProcessingRunState.AWAITING_CLARIFICATION)
+        await _log_step(
+            db,
+            run,
+            "clarification_requested",
+            {
+                "question": question,
+                "round": run.clarification_rounds,
+                "reason": req.ambiguity_reason,
+            },
+        )
+        return
+
     if req.intent != Intent.BOOK:
         await _escalate(
             db,
             run,
             f"intent '{req.intent.value}' is not yet automated (booking only in this phase)",
         )
-        return run
-
-    if req.is_ambiguous:
-        await _escalate(
-            db, run, req.ambiguity_reason or "request flagged ambiguous by interpretation"
-        )
-        return run
+        return
 
     matched_service_name = match_known_service(req.service_hint, known_services)
     if matched_service_name is None:
         await _escalate(
             db, run, f"could not match service hint {req.service_hint!r} to a configured service"
         )
-        return run
+        return
 
     service = (
         await db.execute(
@@ -291,6 +343,74 @@ async def start_request(
     run.resolved_date = req.resolved_date
 
     await _offer_slots_or_escalate(db, run, business, service, now, resolved_date=req.resolved_date)
+
+
+async def start_request(
+    db: AsyncSession,
+    payload: StartRequestIn,
+    *,
+    interpreter: Interpreter,
+    now: datetime | None = None,
+) -> ProcessingRun:
+    now = now or datetime.now(UTC)
+
+    business = await db.get(Business, payload.business_id)
+    if business is None:
+        raise DomainError(f"Business {payload.business_id} not found")
+
+    if payload.customer_id is not None:
+        customer_id = payload.customer_id
+    else:
+        customer = await find_or_create_customer(
+            db,
+            business_id=business.id,
+            name=payload.customer_name,  # type: ignore[arg-type]
+            contact=payload.customer_contact,  # type: ignore[arg-type]
+        )
+        customer_id = customer.id
+
+    run = ProcessingRun(
+        business_id=payload.business_id,
+        customer_id=customer_id,
+        raw_message=payload.message,
+        state=ProcessingRunState.RECEIVED,
+        messages=[],
+    )
+    db.add(run)
+    await db.flush()
+    await _log_step(db, run, "received")
+    await _transition(db, run, ProcessingRunState.INTERPRETING)
+
+    known_services = await _known_services(db, business.id)
+    await _interpret_and_route(db, run, business, known_services, payload.message, interpreter, now)
+    await db.commit()
+    return run
+
+
+async def reply_to_clarification(
+    db: AsyncSession,
+    processing_run_id: UUID,
+    message: str,
+    *,
+    interpreter: Interpreter,
+    now: datetime | None = None,
+) -> ProcessingRun:
+    now = now or datetime.now(UTC)
+
+    run = await db.get(ProcessingRun, processing_run_id)
+    if run is None:
+        raise ProcessingRunNotFoundError(processing_run_id)
+    if run.state != ProcessingRunState.AWAITING_CLARIFICATION:
+        raise ProcessingRunStateError(
+            f"ProcessingRun {processing_run_id} is {run.state.value}, not AWAITING_CLARIFICATION"
+        )
+
+    business = await db.get(Business, run.business_id)
+    await _transition(db, run, ProcessingRunState.INTERPRETING)
+    await _log_step(db, run, "clarification_reply_received")
+
+    known_services = await _known_services(db, business.id)
+    await _interpret_and_route(db, run, business, known_services, message, interpreter, now)
     await db.commit()
     return run
 

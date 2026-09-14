@@ -57,7 +57,24 @@ cases:
   - id: book-no-service-mentioned
     message: "Do you have anything open this Friday?"
     expected:
-      intent: book
+      # Relabeled -- architecture review, Finding 1: this is the same
+      # shape as "Can I come Friday?" (could mean "do you have a booking
+      # slot open" or "are you open for business Friday"), and treating
+      # it as confidently `book` was the same gap the live browser test
+      # surfaced. Was: intent: book, is_ambiguous: false.
+      is_ambiguous: true
+      candidate_intents_contains: [book, question]
+
+  - id: intent-ambiguous-book-or-question
+    message: "Can I come Friday?"
+    expected:
+      is_ambiguous: true
+      candidate_intents_contains: [book, question]
+
+  - id: clear-hours-question-not-ambiguous
+    message: "Are you open Friday?"
+    expected:
+      intent: question
       is_ambiguous: false
 
   - id: reschedule-no-target-date

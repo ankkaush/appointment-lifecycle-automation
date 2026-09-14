@@ -74,6 +74,20 @@ _TOOL_SCHEMA = {
                     "If is_ambiguous is true, a short explanation of what's missing " "or unclear."
                 ),
             },
+            "candidate_intents": {
+                "type": ["array", "null"],
+                "items": {
+                    "type": "string",
+                    "enum": ["book", "reschedule", "cancel", "question", "unknown"],
+                },
+                "description": (
+                    "Only when is_ambiguous is true and the message plausibly means "
+                    "one of a small, specific set of intents -- list those "
+                    "candidates. Null otherwise, including when the message is "
+                    "simply incoherent (zero candidates, not a multi-candidate "
+                    "situation)."
+                ),
+            },
             "confidence": {
                 "type": "number",
                 "description": (
@@ -102,7 +116,19 @@ def _system_prompt(today: date, known_services: list[str]) -> str:
         "null but does not by itself make the message ambiguous for a booking "
         "intent — leave is_ambiguous false and let date_hint carry the vague "
         "preference forward. Only set is_ambiguous true when there truly isn't "
-        "enough in the message to act on at all."
+        "enough in the message to act on at all.\n\n"
+        "Ambiguity can also be about *which* intent the customer means, not "
+        'just missing detail inside an assumed intent. For example, "Can I '
+        'come Friday?" could be a booking request or a question about '
+        "whether you're open Friday -- in a case like that, set is_ambiguous "
+        "true and candidate_intents to the short list it could plausibly be "
+        '(e.g. ["book", "question"]). Reserve candidate_intents for a '
+        "genuine, small fork like this. Leave it null for a message that "
+        'gives no coherent signal at all (intent is "unknown," and there\'s '
+        "nothing to list). Leave it null for a message whose intent is "
+        "already clear but missing a detail (intent already reflects the "
+        "clear reading; is_ambiguous and ambiguity_reason describe what's "
+        "missing, not candidate_intents)."
     )
 
 

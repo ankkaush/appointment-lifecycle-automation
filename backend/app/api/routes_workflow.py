@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.dependency import get_interpreter
 from app.ai.interpreter import Interpreter
+from app.api.rate_limit import enforce_chat_rate_limit
 from app.core.db import get_db
 from app.domain.exceptions import DomainError
 from app.workflow.exceptions import WorkflowError
@@ -23,13 +24,14 @@ from app.workflow.models import (
     WorkflowStep,
 )
 from app.workflow.notifications import MockNotificationProvider, NotificationService
-from app.workflow.orchestrator import confirm_slot, start_request
+from app.workflow.orchestrator import confirm_slot, reply_to_clarification, start_request
 from app.workflow.schemas import (
     AIInvocationOut,
     ConfirmSlotIn,
     EscalationCaseOut,
     ProcessingRunOut,
     ProcessingRunTraceOut,
+    ReplyIn,
     StartRequestIn,
     WorkflowStepOut,
 )
@@ -41,7 +43,12 @@ def get_notification_service() -> NotificationService:
     return MockNotificationProvider()
 
 
-@router.post("/requests", response_model=ProcessingRunOut, status_code=201)
+@router.post(
+    "/requests",
+    response_model=ProcessingRunOut,
+    status_code=201,
+    dependencies=[Depends(enforce_chat_rate_limit)],
+)
 async def create_request(
     payload: StartRequestIn,
     db: AsyncSession = Depends(get_db),
@@ -51,6 +58,25 @@ async def create_request(
         return await start_request(db, payload, interpreter=interpreter)
     except DomainError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post(
+    "/requests/{processing_run_id}/reply",
+    response_model=ProcessingRunOut,
+    dependencies=[Depends(enforce_chat_rate_limit)],
+)
+async def reply_request(
+    processing_run_id: UUID,
+    payload: ReplyIn,
+    db: AsyncSession = Depends(get_db),
+    interpreter: Interpreter = Depends(get_interpreter),
+) -> ProcessingRun:
+    try:
+        return await reply_to_clarification(
+            db, processing_run_id, payload.message, interpreter=interpreter
+        )
+    except WorkflowError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/requests/{processing_run_id}/confirm", response_model=ProcessingRunOut)

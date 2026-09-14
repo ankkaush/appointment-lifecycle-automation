@@ -90,6 +90,16 @@ async def _run_case(
         checks["service_hint"] = bool(req.service_hint) and (
             expected["service_hint_contains"].lower() in req.service_hint.lower()
         )
+    if "candidate_intents_contains" in expected:
+        got = {i.value for i in (req.candidate_intents or [])}
+        want = set(expected["candidate_intents_contains"])
+        checks["candidate_intents"] = want.issubset(got)
+
+    notes = []
+    if "service_hint_contains" in expected:
+        notes.append(f"service_hint={req.service_hint!r}")
+    if "candidate_intents_contains" in expected:
+        notes.append(f"candidate_intents={req.candidate_intents!r}")
 
     return CaseResult(
         id=case["id"],
@@ -100,7 +110,7 @@ async def _run_case(
         predicted_intent=req.intent.value,
         predicted_is_ambiguous=req.is_ambiguous,
         expected_is_ambiguous=expected.get("is_ambiguous"),
-        notes=[f"service_hint={req.service_hint!r}"] if "service_hint_contains" in expected else [],
+        notes=notes,
         input_tokens=outcome.metadata.input_tokens,
         output_tokens=outcome.metadata.output_tokens,
     )
@@ -136,6 +146,13 @@ async def run() -> int:
         else 1.0
     )
 
+    candidate_checked = [r for r in results if "candidate_intents" in r.checks]
+    candidate_acc = (
+        sum(r.checks["candidate_intents"] for r in candidate_checked) / len(candidate_checked)
+        if candidate_checked
+        else 1.0
+    )
+
     false_confident = [
         r for r in results if not r.ok and r.confidence >= CONFIDENCE_FALSE_POSITIVE_THRESHOLD
     ]
@@ -148,6 +165,10 @@ async def run() -> int:
     )
     print(
         f"  service-hint accuracy:        {service_acc:.0%}  ({len(service_checked)} cases graded)"
+    )
+    print(
+        f"  candidate-intents accuracy:   {candidate_acc:.0%}"
+        f"  ({len(candidate_checked)} cases graded)"
     )
     print(f"  false-confidence rate:        {len(false_confident)}/{total} wrong-but-confident")
 
@@ -181,6 +202,7 @@ async def run() -> int:
         "intent_accuracy": intent_acc,
         "ambiguity_recall": ambiguity_recall,
         "service_accuracy": service_acc,
+        "candidate_intents_accuracy": candidate_acc,
         "false_confidence_count": len(false_confident),
         "failures": [r.id for r in failures],
         "total_input_tokens": total_input_tokens,

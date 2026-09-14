@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Book an appointment</title>
+<style>
+  /* Deliberately plain: this page holds no booking/availability logic --
+     it renders whatever the workflow API returns and posts back whatever
+     the customer or button click produces. See app/api/routes_workflow.py
+     for the three calls this page makes: POST /requests, POST /reply,
+     POST /confirm. */
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 24px 16px 96px;
+    background: Canvas;
+    color: CanvasText;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; margin-bottom: 4px; }
+  p.sub { color: GrayText; margin-top: 0; font-size: 0.9rem; }
+
+  #setup { display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
+  #setup input {
+    padding: 10px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: Field; color: FieldText; font-size: 0.95rem;
+  }
+  #setup button, .slot-btn, #send-btn {
+    padding: 10px 16px; border-radius: 8px; border: none;
+    background: #2b6cb0; color: white; font-size: 0.95rem; cursor: pointer;
+  }
+  #setup button:disabled, #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #thread { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+  .bubble { padding: 10px 14px; border-radius: 12px; max-width: 80%; line-height: 1.4; font-size: 0.95rem; }
+  .bubble.customer { align-self: flex-end; background: #2b6cb0; color: white; border-bottom-right-radius: 2px; }
+  .bubble.assistant { align-self: flex-start; background: color-mix(in srgb, CanvasText 8%, Canvas); border-bottom-left-radius: 2px; }
+  .bubble.system { align-self: center; font-size: 0.85rem; color: GrayText; text-align: center; }
+
+  #slots { display: flex; gap: 8px; flex-wrap: wrap; align-self: flex-start; }
+  .slot-btn { background: white; color: #2b6cb0; border: 1.5px solid #2b6cb0; }
+
+  #composer {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    display: flex; gap: 8px; padding: 12px 16px;
+    background: Canvas; border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+  }
+  #composer input {
+    flex: 1; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: Field; color: FieldText; font-size: 0.95rem;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>Book an appointment</h1>
+  <p class="sub" id="business-hint">Chat naturally -- e.g. "Can I come Friday?"</p>
+
+  <div id="setup">
+    <input id="name-input" placeholder="Your name" autocomplete="name" />
+    <input id="contact-input" placeholder="Email or phone" autocomplete="email" />
+    <button id="setup-btn">Start</button>
+    <p class="sub" id="setup-error" hidden style="color:#c0392b;"></p>
+  </div>
+
+  <div id="thread" hidden></div>
+
+  <form id="composer" hidden>
+    <input id="message-input" placeholder="Type a message" autocomplete="off" />
+    <button id="send-btn" type="submit">Send</button>
+  </form>
+
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const businessId = params.get("business_id");
+  const businessHint = document.getElementById("business-hint");
+  if (!businessId) {
+    businessHint.textContent = "Missing ?business_id=... in the URL -- ask the business for their chat link.";
+    businessHint.style.color = "#c0392b";
+  }
+
+  const setupEl = document.getElementById("setup");
+  const setupBtn = document.getElementById("setup-btn");
+  const setupError = document.getElementById("setup-error");
+  const threadEl = document.getElementById("thread");
+  const composerEl = document.getElementById("composer");
+  const messageInput = document.getElementById("message-input");
+  const sendBtn = document.getElementById("send-btn");
+
+  let customerName = null;
+  let customerContact = null;
+  let runId = null;
+  let runState = null;
+
+  function addBubble(role, text) {
+    const el = document.createElement("div");
+    el.className = "bubble " + role;
+    el.textContent = text;
+    threadEl.appendChild(el);
+    el.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+
+  function addSlotButtons(slots) {
+    const wrap = document.createElement("div");
+    wrap.id = "slots";
+    slots.forEach((slot) => {
+      const btn = document.createElement("button");
+      btn.className = "slot-btn";
+      const d = new Date(slot.start_at);
+      btn.textContent = d.toLocaleString(undefined, {
+        weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+      });
+      btn.addEventListener("click", () => confirmSlot(slot.start_at));
+      wrap.appendChild(btn);
+    });
+    threadEl.appendChild(wrap);
+    wrap.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+
+  function setBusy(busy) {
+    sendBtn.disabled = busy;
+    messageInput.disabled = busy;
+  }
+
+  // Renders only the newest assistant-authored turn (a clarifying
+  // question, or a plain status message) -- the customer's own messages
+  // are already echoed locally as soon as they're sent.
+  function renderAssistantTurn(run) {
+    if (run.state === "AWAITING_CLARIFICATION" && run.messages && run.messages.length) {
+      const last = run.messages[run.messages.length - 1];
+      if (last.role === "assistant") addBubble("assistant", last.content);
+    } else if (run.state === "AWAITING_CONFIRMATION" && run.offered_slots && run.offered_slots.length) {
+      addBubble("assistant", "We have the following times available -- which works for you?");
+      addSlotButtons(run.offered_slots);
+    } else if (run.state === "SUCCEEDED") {
+      addBubble("system", "Appointment confirmed! You'll get a confirmation shortly.");
+    } else if (run.state === "ESCALATED") {
+      addBubble("system", "We're not able to handle this automatically -- a team member will follow up with you.");
+    } else if (run.state === "FAILED") {
+      addBubble("system", "Something went wrong on our end. Please try again in a moment.");
+    }
+    runState = run.state;
+  }
+
+  async function postJSON(path, body) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || ("Request failed: " + res.status));
+    }
+    return res.json();
+  }
+
+  async function startConversation(firstMessage) {
+    setBusy(true);
+    try {
+      const run = await postJSON("/v1/requests", {
+        business_id: businessId,
+        customer_name: customerName,
+        customer_contact: customerContact,
+        message: firstMessage,
+      });
+      runId = run.id;
+      renderAssistantTurn(run);
+    } catch (err) {
+      addBubble("system", err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendReply(message) {
+    setBusy(true);
+    try {
+      const run = await postJSON(`/v1/requests/${runId}/reply`, { message });
+      renderAssistantTurn(run);
+    } catch (err) {
+      addBubble("system", err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmSlot(startAt) {
+    document.getElementById("slots")?.remove();
+    setBusy(true);
+    try {
+      const run = await postJSON(`/v1/requests/${runId}/confirm`, {
+        start_at: startAt,
+        idempotency_key: crypto.randomUUID(),
+      });
+      renderAssistantTurn(run);
+    } catch (err) {
+      addBubble("system", err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  setupBtn.addEventListener("click", () => {
+    const name = document.getElementById("name-input").value.trim();
+    const contact = document.getElementById("contact-input").value.trim();
+    if (!name || !contact) {
+      setupError.textContent = "Please enter both your name and a way to reach you.";
+      setupError.hidden = false;
+      return;
+    }
+    customerName = name;
+    customerContact = contact;
+    setupEl.hidden = true;
+    threadEl.hidden = false;
+    composerEl.hidden = false;
+    messageInput.focus();
+  });
+
+  composerEl.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = messageInput.value.trim();
+    if (!text) return;
+    addBubble("customer", text);
+    messageInput.value = "";
+
+    if (runId === null) {
+      startConversation(text);
+    } else if (runState === "AWAITING_CLARIFICATION") {
+      sendReply(text);
+    } else {
+      addBubble("system", "This conversation has moved past free-text replies -- use the buttons above.");
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,15 +1,40 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.workflow.models import ProcessingRunState
+
+MAX_MESSAGE_LENGTH = 2000
 
 
 class StartRequestIn(BaseModel):
     business_id: UUID
-    customer_id: UUID
-    message: str
+    # Either an existing customer_id, or a name+contact for a first-time
+    # caller -- see app.domain.customers.find_or_create_customer. No
+    # account system: a contact method is the entire identity model.
+    customer_id: UUID | None = None
+    customer_name: str | None = None
+    customer_contact: str | None = None
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
+
+    @model_validator(mode="after")
+    def _customer_identity_provided(self) -> "StartRequestIn":
+        if self.customer_id is None and not (self.customer_name and self.customer_contact):
+            raise ValueError(
+                "provide either customer_id, or both customer_name and customer_contact"
+            )
+        return self
+
+
+class ReplyIn(BaseModel):
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
+
+
+class ConversationMessageOut(BaseModel):
+    role: str
+    content: str
+    at: str
 
 
 class OfferedSlotOut(BaseModel):
@@ -32,6 +57,8 @@ class ProcessingRunOut(BaseModel):
     matched_service_id: UUID | None
     offered_slots: list[OfferedSlotOut] | None
     resulting_appointment_id: UUID | None
+    clarification_rounds: int
+    messages: list[ConversationMessageOut] | None
 
 
 class WorkflowStepOut(BaseModel):
