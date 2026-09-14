@@ -1,13 +1,20 @@
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's Depends()/Query() in argument defaults is the framework's own
+# idiom, not the mutable-default-argument pitfall B008 is meant to catch.
+"app/api/*.py" = ["B008"]
+
 [tool.black]
 line-length = 100
 target-version = ["py312"]
+extend-exclude = "alembic/versions"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -14,9 +14,19 @@ real business rules and real database state.
 
 Architecture proposed and reviewed; implementation in progress.
 
-- [x] **Phase 0** — repo, tooling, Docker Compose, CI, security baseline
-- [ ] Phase 1 — domain core: schema, deterministic availability engine, atomic booking
+- [x] Phase 0 — repo, tooling, Docker Compose, CI, security baseline
+- [x] **Phase 1** — domain core: schema, deterministic availability engine, atomic booking
 - [ ] Phase 2 — AI interpretation layer + golden-set evaluation
+
+Phase 1 detail: `app/domain/` holds the business/service/staff/customer/
+appointment schema, the deterministic availability engine (working hours,
+blocked periods, buffer time, booking-notice/horizon policy), and the
+booking engine. Concurrency safety comes from a Postgres range-exclusion
+constraint on `appointments` plus a client-supplied idempotency key —
+proven under a real concurrent-request race in
+`tests/domain/test_concurrency.py`. `app/api/` is a thin HTTP layer over
+that — no booking or availability logic lives there. No AI, no calendar
+provider, no notifications yet; those arrive in Phases 2, 4, and 7.
 - [ ] Phase 3 — workflow engine, audit trail, notification interface
 - [ ] Phase 4 — calendar provider abstraction (mock + Google Calendar)
 - [ ] Phase 5 — background jobs: reminders, no-show detection, recovery
