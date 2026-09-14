@@ -59,3 +59,25 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: pytest
+
+  ai-eval:
+    # Golden-set eval for the AI interpretation layer (see eval/run_eval.py).
+    # Calls the real Anthropic API, so it's opt-in: add an ANTHROPIC_API_KEY
+    # *secret* and an AI_EVAL_ENABLED=true repo *variable* to turn this on.
+    # A secret can't be read in a job-level `if`, hence the separate
+    # variable flag. Skipped (not failed) without it, so contributors
+    # without a key still get full lint/test coverage.
+    runs-on: ubuntu-latest
+    if: ${{ vars.AI_EVAL_ENABLED == 'true' }}
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m eval.run_eval

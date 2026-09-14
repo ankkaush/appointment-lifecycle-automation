@@ -16,6 +16,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
+from app.core.db import engine as app_engine
 from app.domain.models import (
     Base,
     Business,
@@ -59,6 +60,20 @@ async def session_factory(_schema):
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _dispose_app_engine() -> AsyncIterator[None]:
+    """app.core.db.engine is a process-global singleton, correct for the
+    real running app (one process, one event loop) but not for a pytest
+    suite where every test function gets its own fresh loop by default.
+    A pooled asyncpg connection bound to a previous test's loop raises
+    "attached to a different loop" the next time it's checked out under a
+    new one — dispose the pool after every test so the next checkout
+    reconnects fresh, wherever the app itself (via TestClient/ASGI calls)
+    was actually exercised."""
+    yield
+    await app_engine.dispose()
 
 
 @pytest_asyncio.fixture(autouse=True)

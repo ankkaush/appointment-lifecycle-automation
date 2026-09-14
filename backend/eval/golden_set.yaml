@@ -1,0 +1,164 @@
+# Golden set for the AI interpretation layer (Phase 2).
+#
+# Deliberately includes cases the model should get *wrong* or flag as
+# ambiguous, not only easy wins — an eval set that only contains clean
+# examples proves nothing. known_services defaults to a standard trio
+# below unless a case overrides it.
+
+known_services_default:
+  - Haircut
+  - Deep Tissue Massage
+  - Consultation
+
+cases:
+  - id: clear-book-with-time-window
+    message: "Hi, I'd like an appointment next Tuesday afternoon. Anything after 3 PM works."
+    expected:
+      intent: book
+      is_ambiguous: false
+
+  - id: clear-reschedule
+    message: "Can I move my appointment from Thursday to Friday morning?"
+    expected:
+      intent: reschedule
+      is_ambiguous: false
+
+  - id: vague-week-service-named
+    message: "I need a haircut sometime next week."
+    expected:
+      intent: book
+      is_ambiguous: false
+      service_hint_contains: haircut
+
+  - id: clear-cancel-today
+    message: "Can I cancel my appointment today?"
+    expected:
+      intent: cancel
+      is_ambiguous: false
+
+  - id: policy-question
+    message: "What's your cancellation policy?"
+    expected:
+      intent: question
+      is_ambiguous: false
+
+  - id: policy-question-notice
+    message: "How much notice do you need for a booking?"
+    expected:
+      intent: question
+      is_ambiguous: false
+
+  - id: book-no-date-at-all
+    message: "I'd like to come in sometime, whenever works."
+    expected:
+      intent: book
+      is_ambiguous: true
+
+  - id: book-no-service-mentioned
+    message: "Do you have anything open this Friday?"
+    expected:
+      intent: book
+      is_ambiguous: false
+
+  - id: reschedule-no-target-date
+    message: "I need to change my appointment time."
+    expected:
+      intent: reschedule
+      is_ambiguous: true
+
+  - id: gibberish
+    message: "asdkfj qwer 1234 zzz"
+    expected:
+      intent: unknown
+      is_ambiguous: true
+
+  - id: off-topic
+    message: "Do you sell gift cards?"
+    expected:
+      intent: question
+      is_ambiguous: false
+
+  - id: relative-date-tomorrow
+    message: "Can I get a consultation tomorrow morning?"
+    expected:
+      intent: book
+      is_ambiguous: false
+      service_hint_contains: consult
+
+  - id: relative-date-in-two-weeks
+    message: "Book me a massage in two weeks."
+    expected:
+      intent: book
+      is_ambiguous: false
+      service_hint_contains: massage
+
+  - id: mixed-intent-cancel-and-rebook
+    message: "Cancel my Thursday appointment and book me for the following Monday instead."
+    expected:
+      # A genuinely mixed request. We only require the model flag this as
+      # ambiguous rather than silently picking one of the two intents —
+      # the specific intent value it lands on is not graded.
+      is_ambiguous: true
+
+  - id: contradictory-past-date
+    message: "Can I book an appointment for last Tuesday?"
+    expected:
+      intent: book
+      is_ambiguous: true
+
+  - id: unmatched-service
+    message: "Can I get a manicure next week?"
+    expected:
+      intent: book
+      is_ambiguous: false
+      service_hint_contains: manicure
+
+  - id: short-affirmative-no-context
+    message: "Yes that works for me"
+    expected:
+      intent: unknown
+      is_ambiguous: true
+
+  - id: greeting-only
+    message: "Hi there!"
+    expected:
+      intent: unknown
+      is_ambiguous: true
+
+  - id: specific-date-and-time
+    message: "I want a haircut on March 3rd at 2pm."
+    expected:
+      intent: book
+      is_ambiguous: false
+      service_hint_contains: haircut
+
+  - id: no_show_recovery_reply
+    message: "Sorry I missed my appointment, can I come Thursday afternoon instead?"
+    expected:
+      intent: reschedule
+      is_ambiguous: false
+
+  - id: cancel_with_reason_not_needed
+    message: "Something came up, I won't be able to make it Friday, please cancel."
+    expected:
+      intent: cancel
+      is_ambiguous: false
+
+  - id: urgent_same_day
+    message: "Is there anything available today, ASAP?"
+    expected:
+      intent: book
+      is_ambiguous: false
+
+  - id: multiple_services_named
+    message: "Can I book a haircut and also a massage next week?"
+    expected:
+      intent: book
+      is_ambiguous: true
+
+  - id: non_english_fragment
+    message: "Necesito una cita para mañana"
+    expected:
+      # We don't claim multilingual support yet — the honest outcome is
+      # flagging this as unclear rather than guessing at a translation.
+      is_ambiguous: true
