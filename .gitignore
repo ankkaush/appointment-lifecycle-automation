@@ -1,0 +1,31 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# --- Env / secrets ---
+.env
+.env.*.local
+
+# --- Docker ---
+*.log
+
+# --- OS ---
+.DS_Store
+
+# --- Editors ---
+.vscode/
+.idea/
+
+# --- Frontend (future dashboard, Phase 8) ---
+node_modules/
+.next/
+out/
