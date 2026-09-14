@@ -4,6 +4,10 @@ from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Imported for its side effect of registering tables on Base.metadata --
+# every module with model classes must be imported here or autogenerate
+# won't see them.
+import app.workflow.models  # noqa: F401
 from alembic import context
 from app.core.config import get_settings
 from app.domain.models import Base

@@ -3,11 +3,13 @@ from sqlalchemy import text
 
 from app.api.routes import router as domain_router
 from app.api.routes_ai import router as ai_router
+from app.api.routes_workflow import router as workflow_router
 from app.core.db import engine
 
 app = FastAPI(title="Appointment Lifecycle Automation", version="0.1.0")
 app.include_router(domain_router, prefix="/v1", tags=["domain"])
 app.include_router(ai_router, prefix="/v1", tags=["ai"])
+app.include_router(workflow_router, prefix="/v1", tags=["workflow"])
 
 
 @app.get("/health")

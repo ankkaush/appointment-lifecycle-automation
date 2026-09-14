@@ -3,7 +3,6 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain import booking
@@ -15,6 +14,9 @@ from app.domain.exceptions import (
 from app.domain.models import AppointmentStatus, Business, Customer, Service, StaffResource
 from app.domain.schemas import BookingRequest
 
+# `customer` fixture comes from tests/conftest.py — shared across suites now
+# that the workflow tests need it too.
+
 
 def _next_monday_9am_utc(business: Business) -> datetime:
     tz = ZoneInfo(business.timezone)
@@ -23,15 +25,6 @@ def _next_monday_9am_utc(business: Business) -> datetime:
     monday = today + timedelta(days=days_ahead)
     local_9am = datetime.combine(monday, datetime.min.time(), tzinfo=tz).replace(hour=9)
     return local_9am.astimezone(UTC)
-
-
-@pytest_asyncio.fixture
-async def customer(db: AsyncSession, business: Business) -> Customer:
-    obj = Customer(business_id=business.id, name="Alex Rivera", contact="alex@example.com")
-    db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
 
 
 @pytest.mark.asyncio

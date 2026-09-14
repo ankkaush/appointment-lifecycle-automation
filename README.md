@@ -16,8 +16,8 @@ Architecture proposed and reviewed; implementation in progress.
 
 - [x] Phase 0 — repo, tooling, Docker Compose, CI, security baseline
 - [x] Phase 1 — domain core: schema, deterministic availability engine, atomic booking
-- [x] **Phase 2** — AI interpretation layer + golden-set evaluation
-- [ ] Phase 3 — workflow engine, audit trail, notification interface
+- [x] Phase 2 — AI interpretation layer + golden-set evaluation
+- [x] **Phase 3** — workflow engine, audit trail, notification interface
 - [ ] Phase 4 — calendar provider abstraction (mock + Google Calendar)
 - [ ] Phase 5 — background jobs: reminders, no-show detection, recovery
 - [ ] Phase 6 — cancellation & rescheduling
@@ -49,6 +49,32 @@ recall, service-hint accuracy, and a false-confidence rate against the
 real Anthropic API. Wired into CI as an opt-in job gated on an
 `ANTHROPIC_API_KEY` secret and an `AI_EVAL_ENABLED` repo variable, so it's
 skipped rather than failing CI for anyone without a key configured.
+
+Verified live once against the real API (kept deliberately minimal): one
+isolated smoke call through `ClaudeInterpreter`, then the golden set run
+once — 95% intent accuracy, 100% ambiguity recall, 1/24 false-confidence.
+`pytest` itself never calls the real API.
+
+Phase 3 detail: `app/workflow/` is the orchestrator — the one module that
+composes `app/domain` and `app/ai`, which stay independent of each other
+and of it. Two state machines, per the architecture baseline's Concern 1
+correction: `ProcessingRun` (`RECEIVED → INTERPRETING → SLOTS_OFFERED →
+AWAITING_CONFIRMATION → BOOKING → SUCCEEDED/FAILED/ESCALATED/EXPIRED`,
+enforced by a deterministic transition table in `state_machine.py`, not
+just implied) and `Appointment` (unchanged from Phase 1). Every state
+change is written to `AuditEvent` (the business record); every execution
+step — including ones with no state change — to `WorkflowStep` (the
+trace); every AI call's structured output and cost/latency to
+`AIInvocation`. An ambiguous request, an unmatched service, or any
+non-booking intent escalates cleanly to an `EscalationCase` rather than
+guessing. If a confirmed slot is taken by a concurrent request between
+offer and confirm, the workflow re-offers fresh availability instead of
+just failing (`tests/workflow/test_orchestrator.py`, the re-offer race
+test). `NotificationService` (Protocol + `MockNotificationProvider`) is
+the vendor boundary for confirmations — a real provider arrives in Phase
+7 as a new module, not new call sites. `GET /v1/requests/{id}/trace`
+answers "what happened to this request?" directly from these tables — no
+separate tracing stack.
 
 ## Stack
 

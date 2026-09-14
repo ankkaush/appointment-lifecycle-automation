@@ -15,11 +15,16 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+# Imported for its side effect of registering workflow tables on the
+# shared Base.metadata, so _schema's create_all covers them regardless of
+# which test module runs first.
+import app.workflow.models  # noqa: F401,E402
 from app.core.config import get_settings
 from app.core.db import engine as app_engine
 from app.domain.models import (
     Base,
     Business,
+    Customer,
     Service,
     StaffResource,
     StaffWorkingHours,
@@ -134,6 +139,15 @@ async def staff(db: AsyncSession, business: Business, service: Service) -> Staff
                 end_time=time(17, 0),
             )
         )
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@pytest_asyncio.fixture
+async def customer(db: AsyncSession, business: Business) -> Customer:
+    obj = Customer(business_id=business.id, name="Alex Rivera", contact="alex@example.com")
+    db.add(obj)
     await db.commit()
     await db.refresh(obj)
     return obj
