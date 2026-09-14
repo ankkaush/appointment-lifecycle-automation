@@ -15,6 +15,9 @@ htmlcov/
 .env
 .env.*.local
 
+# --- Generated eval output (regenerated on each run) ---
+backend/eval/last_report.json
+
 # --- Docker ---
 *.log
 

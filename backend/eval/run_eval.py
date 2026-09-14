@@ -48,6 +48,12 @@ CONFIDENCE_FALSE_POSITIVE_THRESHOLD = 0.7
 INTENT_ACCURACY_FLOOR = 0.75
 AMBIGUITY_RECALL_FLOOR = 0.7
 
+# Rough, illustrative-only per-token rates (Haiku-tier) for a ballpark cost
+# estimate in the printed report. Not a source of truth for billing --
+# check the Anthropic console for exact usage/spend.
+EST_USD_PER_INPUT_TOKEN = 1.0 / 1_000_000
+EST_USD_PER_OUTPUT_TOKEN = 5.0 / 1_000_000
+
 
 @dataclass
 class CaseResult:
@@ -60,6 +66,8 @@ class CaseResult:
     predicted_is_ambiguous: bool = False
     expected_is_ambiguous: bool | None = None
     notes: list[str] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 async def _run_case(
@@ -93,6 +101,8 @@ async def _run_case(
         predicted_is_ambiguous=req.is_ambiguous,
         expected_is_ambiguous=expected.get("is_ambiguous"),
         notes=[f"service_hint={req.service_hint!r}"] if "service_hint_contains" in expected else [],
+        input_tokens=outcome.metadata.input_tokens,
+        output_tokens=outcome.metadata.output_tokens,
     )
 
 
@@ -139,7 +149,18 @@ async def run() -> int:
     print(
         f"  service-hint accuracy:        {service_acc:.0%}  ({len(service_checked)} cases graded)"
     )
-    print(f"  false-confidence rate:        {len(false_confident)}/{total} wrong-but-confident\n")
+    print(f"  false-confidence rate:        {len(false_confident)}/{total} wrong-but-confident")
+
+    total_input_tokens = sum(r.input_tokens for r in results)
+    total_output_tokens = sum(r.output_tokens for r in results)
+    est_cost = (
+        total_input_tokens * EST_USD_PER_INPUT_TOKEN
+        + total_output_tokens * EST_USD_PER_OUTPUT_TOKEN
+    )
+    print(
+        f"  tokens:                       {total_input_tokens} in / {total_output_tokens} out"
+        f"  (~${est_cost:.4f} est., illustrative only)\n"
+    )
 
     failures = [r for r in results if not r.ok]
     if failures:
@@ -162,6 +183,9 @@ async def run() -> int:
         "service_accuracy": service_acc,
         "false_confidence_count": len(false_confident),
         "failures": [r.id for r in failures],
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "estimated_cost_usd": round(est_cost, 4),
     }
     REPORT_PATH.write_text(json.dumps(report, indent=2))
     print(f"Report written to {REPORT_PATH}")
