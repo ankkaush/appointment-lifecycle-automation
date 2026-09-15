@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     calendar_provider: str = "mock"
     notification_provider: str = "console"
+    resend_api_key: str | None = None
+    resend_from_email: str | None = None
 
     sentry_dsn: str | None = None
 

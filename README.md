@@ -21,8 +21,8 @@ Architecture proposed and reviewed; implementation in progress.
 - [x] Phase 4 — customer web chat (bounded clarification loop + thin chat UI)
 - [x] Phase 5 — calendar provider abstraction (mock; Google Calendar deferred)
 - [x] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
-- [x] **Phase 7** — cancellation & rescheduling
-- [ ] Phase 8 — real notification provider
+- [x] Phase 7 — cancellation & rescheduling
+- [x] **Phase 8** — real notification provider
 - [ ] Phase 9 — business dashboard
 - [ ] Phase 10 — security hardening, full evaluation suite, deployment
 
@@ -219,6 +219,48 @@ committed in Postgres. A reschedule also moves the appointment's pending
 against a start time that no longer exists. `app/domain/availability.py`'s
 one addition aside, `app/domain/booking.py` and `app/domain/noshow.py` are
 untouched. No live Anthropic calls in this phase's implementation.
+
+Phase 8 detail: `app/workflow/notifications.py` gains `ConsoleNotificationProvider`
+(logs and persists, no credentials -- the new local-dev default) alongside
+the unchanged `NotificationService` Protocol and `MockNotificationProvider`
+tests use. The real vendor, Resend, lives in its own module,
+`app/workflow/notifications_resend.py` -- the only file that imports
+`httpx` for this, matching how `app/ai/providers/claude.py` is the only
+module that imports the Anthropic SDK. All three implementations share the
+same five-method Protocol; message content (subject/body per notification
+type) is composed once in `notifications.py` and reused by all three,
+rather than duplicated per provider. A new composition root,
+`app/workflow/notification_dependency.py`, reads `NOTIFICATION_PROVIDER`
+(`console` / `resend` / `mock`) and is now what both `routes_workflow.py`
+and `app/worker.py` depend on -- previously `app/worker.py` hardcoded
+`MockNotificationProvider()` directly, which would have silently defeated
+this phase for reminders and no-show recovery outreach (arguably the two
+most important notifications) had it been left as-is.
+
+`Customer.contact` has no channel marker (email vs. phone) by design since
+Phase 4, and Resend is email-only: rather than adding client-side
+validation, a contact that isn't a deliverable address is simply a send
+that fails. `ResendNotificationProvider` catches that -- any `httpx`
+error or non-2xx response -- internally and records the `Notification` as
+`FAILED` instead of raising, the same discipline `CalendarProviderError`
+handling uses for calendar sync: a failed send is recorded and never
+blocks or unwinds the appointment action that triggered it, and
+`NotificationStatus.FAILED` (unused since Phase 3) finally means
+something. This keeps every existing call site in `orchestrator.py` and
+`jobs.py` completely unchanged -- the failure handling lives entirely
+inside the provider, not at each of the five call sites. No manual retry
+endpoint for a failed notification yet (unlike calendar's
+`retry-calendar-sync`) -- deferred until an actual need shows up, per the
+same "keep scope focused" discipline as every other phase.
+
+Not yet exercised against the real Resend API (no live credentials
+configured) -- same deliberate deferral as the real Google Calendar
+adapter in Phase 5. `ResendNotificationProvider` accepts an optional
+`httpx` transport for exactly this reason: tests inject an
+`httpx.MockTransport` to verify the success and failure paths without a
+real network call, and a real deployment can supply real credentials via
+`.env` (`RESEND_API_KEY`, `RESEND_FROM_EMAIL`) without any code changes.
+No live Anthropic calls in this phase's implementation.
 
 ## Stack
 

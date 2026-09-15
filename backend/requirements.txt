@@ -7,3 +7,4 @@ asyncpg==0.30.0
 alembic==1.14.0
 tzdata==2024.2
 anthropic==0.40.0
+httpx==0.28.1

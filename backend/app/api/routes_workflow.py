@@ -26,7 +26,8 @@ from app.workflow.models import (
     ProcessingRun,
     WorkflowStep,
 )
-from app.workflow.notifications import MockNotificationProvider, NotificationService
+from app.workflow.notification_dependency import get_notification_service
+from app.workflow.notifications import NotificationService
 from app.workflow.orchestrator import (
     confirm_slot,
     reply_to_clarification,
@@ -45,10 +46,6 @@ from app.workflow.schemas import (
 )
 
 router = APIRouter()
-
-
-def get_notification_service() -> NotificationService:
-    return MockNotificationProvider()
 
 
 def get_calendar_provider() -> CalendarProvider:

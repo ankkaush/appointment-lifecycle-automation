@@ -7,9 +7,9 @@ interval; not a replacement for app/worker.py's loop.
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.routes_workflow import get_notification_service
 from app.core.db import get_db
 from app.workflow.jobs import run_worker_tick
+from app.workflow.notification_dependency import get_notification_service
 from app.workflow.notifications import NotificationService
 
 router = APIRouter()

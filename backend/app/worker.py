@@ -15,7 +15,7 @@ import logging
 
 from app.core.db import SessionLocal
 from app.workflow.jobs import run_worker_tick
-from app.workflow.notifications import MockNotificationProvider
+from app.workflow.notification_dependency import get_notification_service
 
 POLL_INTERVAL_SECONDS = 60
 
@@ -25,7 +25,7 @@ logger = logging.getLogger("worker")
 
 async def tick() -> None:
     async with SessionLocal() as db:
-        summary = await run_worker_tick(db, notification_service=MockNotificationProvider())
+        summary = await run_worker_tick(db, notification_service=get_notification_service())
     if any(summary.values()):
         logger.info("tick: %s", summary)
 
