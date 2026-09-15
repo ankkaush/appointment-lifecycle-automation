@@ -48,7 +48,10 @@ async def test_full_lifecycle_via_http(
         assert confirmed["state"] == "SUCCEEDED"
         assert confirmed["resulting_appointment_id"] is not None
 
-        trace_resp = await client.get(f"/v1/requests/{run['id']}/trace")
+        trace_resp = await client.get(
+            f"/v1/requests/{run['id']}/trace",
+            headers={"Authorization": f"Bearer {business.api_key}"},
+        )
         assert trace_resp.status_code == 200
         trace = trace_resp.json()
         assert trace["ai_invocation"]["intent"] == "book"
@@ -81,9 +84,11 @@ async def test_escalation_flow_via_http(business: Business, customer: Customer) 
         run = create_resp.json()
         assert run["state"] == "ESCALATED"
 
+        auth_headers = {"Authorization": f"Bearer {business.api_key}"}
         list_resp = await client.get(
             "/v1/escalations",
             params={"business_id": str(business.id), "status_filter": "OPEN"},
+            headers=auth_headers,
         )
         assert list_resp.status_code == 200
         cases = list_resp.json()
@@ -96,6 +101,7 @@ async def test_escalation_flow_via_http(business: Business, customer: Customer) 
         resolve_resp = await client.post(
             f"/v1/escalations/{matching[0]['id']}/resolve",
             params={"business_id": str(business.id)},
+            headers=auth_headers,
         )
         assert resolve_resp.status_code == 200
         assert resolve_resp.json()["status"] == "RESOLVED"

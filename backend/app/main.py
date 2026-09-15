@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -9,8 +11,16 @@ from app.api.routes_jobs import router as jobs_router
 from app.api.routes_workflow import router as workflow_router
 from app.core.config import get_settings
 from app.core.db import engine
+from app.core.startup_checks import validate_production_settings
 
-app = FastAPI(title="Appointment Lifecycle Automation", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    validate_production_settings(get_settings())
+    yield
+
+
+app = FastAPI(title="Appointment Lifecycle Automation", version="0.1.0", lifespan=lifespan)
 
 # The chat UI (Phase 4) is same-origin -- mounted directly below, no CORS
 # needed. The Phase 9 dashboard is a separate Next.js app on its own

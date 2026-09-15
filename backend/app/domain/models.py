@@ -70,6 +70,14 @@ class Business(Base):
     # since the two actions carry the same "how much notice do we need"
     # question.
     min_reschedule_notice_hours: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=24)
+    # SHA-256 of the business's API key (Phase 10) -- never the plaintext,
+    # which is shown to the caller exactly once, at issuance or rotation
+    # (see app.api.auth). Nullable: a business created before this column
+    # existed, or one whose key was never issued, has no working key
+    # until rotate-api-key is called -- that endpoint allows one
+    # unauthenticated bootstrap call for exactly that state, and requires
+    # the current key for every call after.
+    api_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=func.now()
     )

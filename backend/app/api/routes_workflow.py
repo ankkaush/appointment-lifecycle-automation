@@ -6,12 +6,13 @@ lives here.
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.dependency import get_interpreter
 from app.ai.interpreter import Interpreter
+from app.api.auth import require_business_api_key
 from app.api.rate_limit import enforce_chat_rate_limit
 from app.core.db import get_db
 from app.domain.exceptions import DomainError
@@ -131,7 +132,12 @@ async def retry_calendar_sync_request(
     appointment_id: UUID,
     db: AsyncSession = Depends(get_db),
     calendar_provider: CalendarProvider = Depends(get_calendar_provider),
+    authorization: str | None = Header(None),
 ) -> Appointment:
+    appointment = await db.get(Appointment, appointment_id)
+    if appointment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appointment not found")
+    await require_business_api_key(db, appointment.business_id, authorization)
     try:
         return await retry_calendar_sync(db, appointment_id, calendar_provider=calendar_provider)
     except DomainError as exc:
@@ -140,11 +146,14 @@ async def retry_calendar_sync_request(
 
 @router.get("/requests/{processing_run_id}/trace", response_model=ProcessingRunTraceOut)
 async def get_trace(
-    processing_run_id: UUID, db: AsyncSession = Depends(get_db)
+    processing_run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    authorization: str | None = Header(None),
 ) -> ProcessingRunTraceOut:
     run = await db.get(ProcessingRun, processing_run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="ProcessingRun not found")
+    await require_business_api_key(db, run.business_id, authorization)
 
     steps = (
         (
@@ -173,12 +182,13 @@ async def list_escalations(
     business_id: UUID,
     status_filter: EscalationStatus | None = None,
     db: AsyncSession = Depends(get_db),
+    authorization: str | None = Header(None),
 ) -> list[EscalationQueueItemOut]:
     # business_id is required and joined-through-filtered here, not
     # optional -- this endpoint used to return every business's
-    # escalations to any caller. Phase 9 is the first real dashboard
-    # consumer, and a dashboard that could see another business's queue
-    # would be broken by construction.
+    # escalations to any caller. Phase 9 scoped it by business_id alone;
+    # Phase 10 requires that business's API key too.
+    await require_business_api_key(db, business_id, authorization)
     stmt = (
         select(EscalationCase, ProcessingRun, Customer)
         .join(ProcessingRun, ProcessingRun.id == EscalationCase.processing_run_id)
@@ -207,8 +217,12 @@ async def list_escalations(
 
 @router.post("/escalations/{escalation_id}/resolve", response_model=EscalationCaseOut)
 async def resolve_escalation(
-    escalation_id: UUID, business_id: UUID, db: AsyncSession = Depends(get_db)
+    escalation_id: UUID,
+    business_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    authorization: str | None = Header(None),
 ) -> EscalationCase:
+    await require_business_api_key(db, business_id, authorization)
     case = await db.get(EscalationCase, escalation_id)
     if case is None:
         raise HTTPException(status_code=404, detail="EscalationCase not found")

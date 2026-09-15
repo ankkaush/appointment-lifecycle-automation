@@ -1,0 +1,35 @@
+# Production image (Phase 10): `next build` + `next start` via the
+# standalone output (next.config.ts), not `next dev` with a bind-mounted
+# source tree. docker-compose.yml's dev `dashboard` service keeps using
+# the plain Dockerfile; docker-compose.prod.yml builds this one instead.
+#
+# NEXT_PUBLIC_API_BASE_URL is read by the browser bundle at build time,
+# not by the Node server at runtime -- it has to be supplied as a build
+# arg, not a container environment variable, or the browser would still
+# call whatever URL was baked in during `docker build`.
+FROM node:22-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+FROM node:22-slim AS builder
+WORKDIR /app
+ARG NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build
+
+FROM node:22-slim AS runner
+WORKDIR /app
+# node:22-slim already ships a non-root `node` user at uid 1000 --
+# reused rather than creating another one at the same id.
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+
+USER node
+ENV PORT=3000
+
+CMD ["node", "server.js"]

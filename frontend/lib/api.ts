@@ -1,8 +1,7 @@
 // Thin, typed wrapper around the two backend endpoints this dashboard
-// needs. No auth header yet -- the backend trusts a business_id the same
-// way the rest of the API does today (see README, Phase 9); this is the
-// one place that would gain an Authorization header once real login
-// exists, without every call site changing.
+// needs. Phase 10 added per-business API keys on the backend -- every
+// call here now sends one as a Bearer token; this is the one place that
+// changed, no call site elsewhere in the app needed to know.
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8010";
 
@@ -32,14 +31,21 @@ async function parseErrorDetail(response: Response): Promise<string> {
   return `${response.status} ${response.statusText}`;
 }
 
+function authHeaders(apiKey: string): HeadersInit {
+  return { Authorization: `Bearer ${apiKey}` };
+}
+
 export async function fetchEscalations(
   businessId: string,
+  apiKey: string,
   statusFilter?: EscalationStatus,
 ): Promise<EscalationQueueItem[]> {
   const params = new URLSearchParams({ business_id: businessId });
   if (statusFilter) params.set("status_filter", statusFilter);
 
-  const response = await fetch(`${API_BASE_URL}/v1/escalations?${params}`);
+  const response = await fetch(`${API_BASE_URL}/v1/escalations?${params}`, {
+    headers: authHeaders(apiKey),
+  });
   if (!response.ok) {
     throw new ApiError(await parseErrorDetail(response));
   }
@@ -49,11 +55,12 @@ export async function fetchEscalations(
 export async function resolveEscalation(
   escalationId: string,
   businessId: string,
+  apiKey: string,
 ): Promise<EscalationQueueItem> {
   const params = new URLSearchParams({ business_id: businessId });
   const response = await fetch(
     `${API_BASE_URL}/v1/escalations/${escalationId}/resolve?${params}`,
-    { method: "POST" },
+    { method: "POST", headers: authHeaders(apiKey) },
   );
   if (!response.ok) {
     throw new ApiError(await parseErrorDetail(response));

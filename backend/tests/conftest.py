@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 # shared Base.metadata, so _schema's create_all covers them regardless of
 # which test module runs first.
 import app.workflow.models  # noqa: F401,E402
+from app.api.auth import generate_api_key, hash_api_key
 from app.core.config import get_settings
 from app.core.db import engine as app_engine
 from app.domain.models import (
@@ -102,15 +103,20 @@ async def _clean_tables(_schema) -> AsyncIterator[None]:
 
 @pytest_asyncio.fixture
 async def business(db: AsyncSession) -> Business:
+    plaintext_key = generate_api_key()
     obj = Business(
         name="Test Salon",
         timezone="America/New_York",
         min_booking_notice_minutes=0,
         max_booking_horizon_days=90,
+        api_key_hash=hash_api_key(plaintext_key),
     )
     db.add(obj)
     await db.commit()
     await db.refresh(obj)
+    # Not a mapped column -- stashed so HTTP-level tests can authenticate
+    # as this business without re-deriving a key (only the hash persists).
+    obj.api_key = plaintext_key
     return obj
 
 

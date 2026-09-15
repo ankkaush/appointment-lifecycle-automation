@@ -1,0 +1,79 @@
+# Production compose file (Phase 10) -- see DEPLOYMENT.md. Differs from
+# docker-compose.yml in exactly the ways that matter for a real
+# deployment: Dockerfile.prod (no --reload, no dev tools, non-root
+# users), no bind-mounted source, db has no host port published (only
+# reachable from other containers on this network), and every credential
+# comes from the environment rather than a hardcoded dev password.
+#
+# This still runs Postgres as a container alongside the app, which is a
+# reasonable self-contained deployment but not the only production
+# shape -- pointing DATABASE_URL at a managed Postgres instance instead
+# and dropping the `db` service entirely is equally valid; nothing else
+# here assumes a containerized database.
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up --build -d
+#   docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: appointment
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: appointment_automation
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appointment -d appointment_automation"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://appointment:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/appointment_automation
+    ports:
+      - "8010:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://appointment:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/appointment_automation
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python -m app.worker
+
+  dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # Baked into the browser bundle at build time -- see
+        # Dockerfile.prod's comment on why this can't be a plain
+        # container environment variable.
+        NEXT_PUBLIC_API_BASE_URL: ${API_PUBLIC_URL:?API_PUBLIC_URL must be set}
+    restart: unless-stopped
+    ports:
+      - "3010:3000"
+    depends_on:
+      - api
+
+volumes:
+  db_data:

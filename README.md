@@ -23,8 +23,8 @@ Architecture proposed and reviewed; implementation in progress.
 - [x] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
 - [x] Phase 7 — cancellation & rescheduling
 - [x] Phase 8 — real notification provider
-- [x] **Phase 9** — business dashboard
-- [ ] Phase 10 — security hardening, full evaluation suite, deployment
+- [x] Phase 9 — business dashboard
+- [x] **Phase 10** — security hardening, full evaluation suite, deployment
 
 Phase 1 detail: `app/domain/` holds the business/service/staff/customer/
 appointment schema, the deterministic availability engine (working hours,
@@ -271,20 +271,21 @@ existing `GET /v1/escalations` / `POST /v1/escalations/{id}/resolve`
 endpoints through a thin typed wrapper (`lib/api.ts`).
 
 No login exists anywhere in this system yet, and building one was
-explicitly out of scope for this phase (that's real auth, Phase 10's
-"security hardening"). Given that, the dashboard trusts a `business_id`
-the same way the rest of the API already does -- entered by hand for now,
-persisted in the browser's `localStorage` for convenience across reloads.
-That surfaced a real, pre-existing gap rather than one this phase
-introduced: `GET /v1/escalations` had no business scoping at all before
-now -- any caller could see every business's escalation queue. Both
-endpoints now require `business_id` and filter/verify by it; resolving an
-escalation for the wrong business returns the same 404 as one that
-doesn't exist, rather than confirming which UUIDs are real for someone
-else's business. The list endpoint also gained a proper response shape
-(`EscalationQueueItemOut`, joined through `ProcessingRun` to `Customer`)
--- the original `EscalationCaseOut` was just an opaque `processing_run_id`
-and a reason, not enough for a human to act on.
+explicitly out of scope for this phase -- Phase 10 added a per-business
+API key instead (see below), not full accounts/sessions. Given that, the
+dashboard trusts a `business_id` the same way the rest of the API already
+does -- entered by hand, persisted in the browser's `localStorage` for
+convenience across reloads. That surfaced a real, pre-existing gap rather
+than one this phase introduced: `GET /v1/escalations` had no business
+scoping at all before now -- any caller could see every business's
+escalation queue. Both endpoints now require `business_id` and filter/
+verify by it; resolving an escalation for the wrong business returns the
+same 404 as one that doesn't exist, rather than confirming which UUIDs
+are real for someone else's business. The list endpoint also gained a
+proper response shape (`EscalationQueueItemOut`, joined through
+`ProcessingRun` to `Customer`) -- the original `EscalationCaseOut` was
+just an opaque `processing_run_id` and a reason, not enough for a human
+to act on.
 
 `app/main.py` gained `CORSMiddleware`, scoped to the dashboard's origin
 only -- the first cross-origin browser client this API has ever had (the
@@ -294,6 +295,64 @@ on port 3010, alongside `db`/`api`/`worker`, wired the same way: build
 context, volume-mounted source, no new infrastructure component beyond
 the one new container. No live Anthropic calls in this phase's
 implementation.
+
+Phase 10 detail: the authorization gap Phase 9 partially closed for
+`/escalations` turned out to run through the *entire* domain API --
+every CRUD endpoint (`/services`, `/staff`, `/staff/{id}/services/{id}`,
+`/staff/{id}/working-hours`, `/customers`, direct `/appointments`
+creation) took a `business_id` with zero ownership check. `app/api/auth.py`
+adds a per-business API key: `POST /businesses` issues one at creation
+(shown in the response exactly once; only its SHA-256 hash is ever
+persisted -- a fast hash, deliberately, since this hashes a 256-bit
+random token rather than a human-chosen password, and a slow
+password-grade hash would buy nothing but latency here), and every
+business-scoped endpoint that isn't part of the customer-facing
+conversational flow now requires it as a Bearer token. A new
+`POST /businesses/{id}/rotate-api-key` handles both real rotation
+(requires the current key) and bootstrapping a business created before
+this column existed (one unauthenticated call allowed, only while no key
+is set). Deliberately not a full account/session system -- a business is
+the caller's identity here, the same shape Stripe or Twilio uses for a
+B2B API caller, not a human logging in; `GET /availability` (read-only,
+non-sensitive) and `POST /jobs/run-tick` (system-wide, not
+business-scoped -- a known gap this phase didn't extend the per-business
+model to cover) stay as they were. This was also the first HTTP-level
+test coverage `app/api/routes.py` has ever had.
+
+`eval/golden_set.yaml` grew from 26 to 33 cases, adding cancel/reschedule
+phrasings that didn't exist when the set was last touched, before Phase 7
+made either a real, automated action rather than an escalate-only intent
+-- including the first case testing a genuine cancel/reschedule
+candidate-intents fork. Running it live surfaced two real findings, not
+just a clean pass: `eval/run_eval.py` crashed outright on a single
+malformed model response (the model occasionally leaks tool-call XML
+syntax into a field) instead of recording it as one failing case and
+continuing -- fixed, since production code already handles this
+exception gracefully and the eval harness should too. And three of the
+newly-added cases had inconsistent expectations with this same file's
+own existing precedent (`reschedule-no-target-date` already establishes
+that a request with no specifics is ambiguous, regardless of which of
+the two actions it names) -- corrected to match rather than re-verified
+with another live call. Four pre-existing cases also regressed on
+`is_ambiguous` against the current model, a real calibration-drift
+finding surfaced by actually running this rather than only expanding it;
+left as-is rather than adjusted blind, since deciding whether that's a
+prompt change or an updated expectation is a judgment call for a
+dedicated follow-up, not something to patch reflexively mid-phase.
+
+`backend/Dockerfile.prod` and `frontend/Dockerfile.prod` are the first
+production-shaped images in this repo -- no `--reload`/`next dev`, no
+bind-mounted source, both run as a non-root user. `docker-compose.prod.yml`
+wires them together with no host port published for `db` and every
+credential required from the environment rather than defaulted.
+`app/core/startup_checks.py` refuses to boot when `APP_ENV=production`
+and a dev-only default is still in place (`SECRET_KEY`, the placeholder
+DB password, an unset `ANTHROPIC_API_KEY`, `NOTIFICATION_PROVIDER=resend`
+missing its credentials) -- every problem reported at once, at process
+start, rather than surfacing later as a confusing runtime error on the
+first real request. See `DEPLOYMENT.md` for what running this in
+production actually involves, including what's deliberately not
+included (a real host, TLS, a managed database, CI/CD to a registry).
 
 ## Stack
 

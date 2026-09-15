@@ -38,6 +38,7 @@ from pathlib import Path
 
 import yaml
 
+from app.ai.exceptions import AIInterpretationError
 from app.ai.providers.claude import ClaudeInterpreter
 from app.core.config import get_settings
 
@@ -76,9 +77,24 @@ async def _run_case(
     expected = case["expected"]
     known_services = case.get("known_services", default_services)
 
-    outcome = await interpreter.interpret(
-        case["message"], today=TODAY, known_services=known_services
-    )
+    try:
+        outcome = await interpreter.interpret(
+            case["message"], today=TODAY, known_services=known_services
+        )
+    except AIInterpretationError as exc:
+        # A single malformed/flaky model response (the model occasionally
+        # leaks tool-call syntax into a field, or the API call itself
+        # fails) shouldn't crash a 30+ case eval run and waste every
+        # token already spent on it -- record it as a failure for this
+        # one case and let the rest proceed, same as production code
+        # treats this exception (see orchestrator.py: FAILED state, not
+        # a crash).
+        return CaseResult(
+            id=case["id"],
+            message=case["message"],
+            ok=False,
+            notes=[f"interpreter error: {exc}"],
+        )
     req = outcome.request
 
     checks: dict[str, bool] = {}

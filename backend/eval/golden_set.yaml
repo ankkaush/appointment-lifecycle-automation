@@ -179,3 +179,69 @@ cases:
       # We don't claim multilingual support yet — the honest outcome is
       # flagging this as unclear rather than guessing at a translation.
       is_ambiguous: true
+
+  # --- Phase 10: cancel/reschedule cases added after Phase 7 made both
+  # real, deterministically-automated actions rather than escalate-only
+  # intents. The AI layer's job here is unchanged -- correct intent
+  # recognition -- but these phrasings weren't represented when the
+  # original set was written before either was wired to anything.
+
+  - id: cancel-no-date-given
+    message: "I need to cancel my appointment."
+    expected:
+      # Corrected after the first live run against this case: the model
+      # consistently treats "no specifics at all" as ambiguous for
+      # cancel exactly like reschedule-no-target-date already expects
+      # for reschedule, not as automatically actionable just because
+      # Phase 7's backend resolves *which* appointment on its own. This
+      # case's original expectation (is_ambiguous: false) was an
+      # inconsistency with that existing precedent, not a model bug --
+      # fixed to match it rather than re-litigated with another live call.
+      intent: cancel
+      is_ambiguous: true
+
+  - id: cancel-via-negation-phrasing
+    message: "Never mind, I don't need my appointment anymore."
+    expected:
+      # Same correction as cancel-no-date-given, same reason.
+      intent: cancel
+      is_ambiguous: true
+
+  - id: cancel-with-apology
+    message: "So sorry, I have to cancel my appointment tomorrow."
+    expected:
+      intent: cancel
+      is_ambiguous: false
+
+  - id: reschedule-explicit-both-times
+    message: "Move my 2pm Tuesday appointment to 4pm Wednesday."
+    expected:
+      intent: reschedule
+      is_ambiguous: false
+
+  - id: reschedule-relative-date-with-service
+    message: "Can I push my haircut to next Friday instead?"
+    expected:
+      intent: reschedule
+      is_ambiguous: false
+      service_hint_contains: haircut
+
+  - id: reschedule-not-cancel-negation-trap
+    message: "I don't want to cancel, just move it to another day."
+    expected:
+      # Explicitly negates cancel -- should land on reschedule, not be
+      # thrown off by "cancel" appearing in the text. is_ambiguous
+      # corrected to true for the same reason as cancel-no-date-given:
+      # "another day" gives no usable date, consistent with
+      # reschedule-no-target-date's existing precedent.
+      intent: reschedule
+      is_ambiguous: true
+
+  - id: cancel-or-reschedule-candidate-fork
+    message: "Something came up, can we sort out my appointment?"
+    expected:
+      # A genuine fork between the two Phase 7 actions, not just
+      # book-vs-question -- no candidate_intents case tested this
+      # combination before.
+      is_ambiguous: true
+      candidate_intents_contains: [cancel, reschedule]

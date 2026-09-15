@@ -21,6 +21,15 @@ class BusinessOut(BusinessCreate):
     id: UUID
 
 
+class BusinessCreatedOut(BusinessOut):
+    """BusinessOut plus the plaintext API key -- returned only from the
+    two moments that key exists in plaintext at all: creation and
+    rotation. Never returned from anywhere else; only the hash is ever
+    persisted (see app.api.auth)."""
+
+    api_key: str
+
+
 class ServiceCreate(BaseModel):
     business_id: UUID
     name: str
