@@ -45,7 +45,13 @@ async def _book(db: AsyncSession, business: Business, customer: Customer) -> App
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     chosen = run.offered_slots[0]
     confirm_payload = ConfirmSlotIn(
         start_at=datetime.fromisoformat(chosen["start_at"]), idempotency_key=str(uuid4())
@@ -249,7 +255,13 @@ async def test_expired_sweep_closes_stale_awaiting_confirmation(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     assert run.state == ProcessingRunState.AWAITING_CONFIRMATION
 
     # Refresh before reading updated_at: it's a server-generated onupdate
@@ -273,7 +285,13 @@ async def test_expired_sweep_leaves_fresh_runs_alone(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     await db.refresh(run)
     soon_after = run.updated_at + timedelta(minutes=1)

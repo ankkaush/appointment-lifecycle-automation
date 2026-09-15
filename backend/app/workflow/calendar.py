@@ -46,13 +46,17 @@ class CalendarProvider(Protocol):
         staff: StaffResource,
         customer: Customer,
     ) -> None:
-        """Not yet called by any workflow -- no cancellation/reschedule
-        flow exists until a later phase. Defined now so the Protocol's
-        shape is complete and stable, per the architecture baseline."""
+        """Called by the Phase 7 reschedule flow to mirror the appointment's
+        new time. Best-effort, like create_event: a failure here is
+        recorded on the appointment's calendar_sync_status and never
+        undoes the reschedule itself, which has already committed in
+        Postgres."""
         ...
 
     async def cancel_event(self, *, calendar_event_id: str) -> None:
-        """Not yet called by any workflow -- see update_event."""
+        """Called by the Phase 7 cancellation flow. Same best-effort
+        discipline as update_event -- a failure here never undoes the
+        cancellation itself."""
         ...
 
 

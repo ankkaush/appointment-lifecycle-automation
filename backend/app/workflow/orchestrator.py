@@ -19,10 +19,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.exceptions import AIInterpretationError
 from app.ai.interpreter import Interpreter
 from app.ai.resolve import match_known_service
-from app.ai.schemas import Intent
+from app.ai.schemas import Intent, InterpretedRequest
+from app.domain import appointments as domain_appointments
 from app.domain import availability, booking
 from app.domain.customers import find_or_create_customer
-from app.domain.exceptions import DomainError, EntityNotFoundError, SlotUnavailableError
+from app.domain.exceptions import (
+    AppointmentNotModifiableError,
+    DomainError,
+    EntityNotFoundError,
+    SlotUnavailableError,
+)
 from app.domain.models import (
     Appointment,
     AppointmentStatus,
@@ -49,6 +55,7 @@ from app.workflow.models import (
     ProcessingRunKind,
     ProcessingRunState,
     ScheduledJob,
+    ScheduledJobStatus,
     ScheduledJobType,
     WorkflowStep,
 )
@@ -225,6 +232,117 @@ async def _offer_slots_or_escalate(
     return True
 
 
+async def _find_upcoming_appointments(
+    db: AsyncSession, business_id: UUID, customer_id: UUID, now: datetime
+) -> list[Appointment]:
+    """The candidate set for the Phase 7 "which appointment" resolution:
+    every still-BOOKED, still-future appointment this customer has. The
+    normal flow only ever acts automatically when there's exactly one --
+    zero or several are handled by the caller as clean escalations, per
+    the approved design. A customer having more than one is a real,
+    intentionally-supported case at the data-model level; this is just
+    the automated flow declining to guess which one they mean."""
+    stmt = (
+        select(Appointment)
+        .where(
+            Appointment.business_id == business_id,
+            Appointment.customer_id == customer_id,
+            Appointment.status == AppointmentStatus.BOOKED,
+            Appointment.start_at > now,
+        )
+        .order_by(Appointment.start_at)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def _handle_cancel_intent(
+    db: AsyncSession,
+    run: ProcessingRun,
+    business: Business,
+    now: datetime,
+    *,
+    notification_service: NotificationService,
+    calendar_provider: CalendarProvider,
+) -> None:
+    candidates = await _find_upcoming_appointments(db, run.business_id, run.customer_id, now)
+    if not candidates:
+        await _escalate(db, run, "no upcoming appointment found to cancel")
+        return
+    if len(candidates) > 1:
+        await _escalate(
+            db, run, "customer has multiple upcoming appointments -- cancellation needs review"
+        )
+        return
+
+    appointment = candidates[0]
+    try:
+        appointment = await domain_appointments.cancel_appointment(db, appointment.id, now=now)
+    except AppointmentNotModifiableError as exc:
+        await _escalate(db, run, str(exc))
+        return
+
+    run.resulting_appointment_id = appointment.id
+    db.add(
+        AuditEvent(
+            processing_run_id=run.id,
+            entity_type="Appointment",
+            entity_id=appointment.id,
+            from_state=AppointmentStatus.BOOKED.value,
+            to_state=appointment.status.value,
+            reason="cancelled via workflow",
+        )
+    )
+    await _transition(db, run, ProcessingRunState.SUCCEEDED)
+    await _log_step(db, run, "cancellation_succeeded", {"appointment_id": str(appointment.id)})
+
+    customer = await db.get(Customer, run.customer_id)
+    await _sync_calendar_cancel(db, appointment, calendar_provider=calendar_provider, run=run)
+    await notification_service.send_cancellation(
+        db, appointment=appointment, customer=customer, run=run
+    )
+    await _log_step(db, run, "cancellation_notice_sent")
+    await db.commit()
+
+
+async def _handle_reschedule_intent(
+    db: AsyncSession,
+    run: ProcessingRun,
+    business: Business,
+    req: InterpretedRequest,
+    now: datetime,
+) -> None:
+    candidates = await _find_upcoming_appointments(db, run.business_id, run.customer_id, now)
+    if not candidates:
+        await _escalate(db, run, "no upcoming appointment found to reschedule")
+        return
+    if len(candidates) > 1:
+        await _escalate(
+            db, run, "customer has multiple upcoming appointments -- reschedule needs review"
+        )
+        return
+
+    appointment = candidates[0]
+    if not domain_appointments.can_modify(appointment, business, now):
+        await _escalate(
+            db,
+            run,
+            f"appointment {appointment.id} is inside the "
+            f"{business.min_reschedule_notice_hours}h reschedule notice window",
+        )
+        return
+
+    service = await db.get(Service, appointment.service_id)
+    run.matched_service_id = service.id
+    run.target_appointment_id = appointment.id
+    run.resolved_date = req.resolved_date
+
+    # Reuses the exact same slot-offering / AWAITING_CONFIRMATION
+    # machinery a fresh booking uses -- confirm_slot below distinguishes
+    # "confirm a reschedule" from "confirm a new booking" purely by
+    # whether target_appointment_id is set.
+    await _offer_slots_or_escalate(db, run, business, service, now, resolved_date=req.resolved_date)
+
+
 async def _known_services(db: AsyncSession, business_id: UUID) -> list[str]:
     return list(
         (
@@ -247,6 +365,9 @@ async def _interpret_and_route(
     message: str,
     interpreter: Interpreter,
     now: datetime,
+    *,
+    notification_service: NotificationService,
+    calendar_provider: CalendarProvider,
 ) -> None:
     """Shared by start_request (first message) and reply_to_clarification
     (a follow-up): append the message, interpret the full transcript so
@@ -298,15 +419,18 @@ async def _interpret_and_route(
     # falls through to the same honest escalation as a confident
     # unacceptable intent.
     #
-    # For an ordinary customer-initiated run, only BOOK is acceptable --
-    # Phase 7 gives cancel/reschedule their own deterministic policy
-    # handling. For a no-show RECOVERY run, RESCHEDULE is accepted too:
-    # a customer replying "can I come Thursday instead?" to a recovery
+    # For an ordinary customer-initiated run, only BOOK drives this
+    # clarification loop -- CANCEL/RESCHEDULE get their own deterministic
+    # policy handling below, but only once the AI is confident about the
+    # intent. An ambiguous "something about my appointment" doesn't open
+    # a second clarification mechanism (the approved Phase 7 design is
+    # explicit that there's no appointment-selection conversation for the
+    # MVP); it falls through to the same immediate escalation as before.
+    # For a no-show RECOVERY run, RESCHEDULE is accepted instead: a
+    # customer replying "can I come Thursday instead?" to a recovery
     # message is describing the exact same action as booking a new
     # appointment for the missed one, whichever word the model reaches
-    # for -- narrowly widening what's acceptable for this one run kind,
-    # not changing what Phase 7 will later mean by "reschedule" for an
-    # existing, still-BOOKED appointment.
+    # for.
     acceptable_intents = (
         {Intent.BOOK, Intent.RESCHEDULE}
         if run.kind == ProcessingRunKind.RECOVERY
@@ -342,11 +466,34 @@ async def _interpret_and_route(
         )
         return
 
+    # Deterministic CANCEL/RESCHEDULE handling for an ordinary run's
+    # *confident* intent only -- an ambiguous cancel/reschedule message
+    # already fell through the clarification gate above (it's not in
+    # acceptable_intents) and lands on the plain escalation below instead,
+    # same as any other still-ambiguous case. A RECOVERY run's RESCHEDULE
+    # means "rebook the missed appointment" and is never routed here (it
+    # falls through to the ordinary booking logic further down, where
+    # matched_service_id is already pre-filled by start_recovery).
+    if run.kind == ProcessingRunKind.CUSTOMER_INITIATED and not req.is_ambiguous:
+        if req.intent == Intent.CANCEL:
+            await _handle_cancel_intent(
+                db,
+                run,
+                business,
+                now,
+                notification_service=notification_service,
+                calendar_provider=calendar_provider,
+            )
+            return
+        if req.intent == Intent.RESCHEDULE:
+            await _handle_reschedule_intent(db, run, business, req, now)
+            return
+
     if req.intent not in acceptable_intents:
         await _escalate(
             db,
             run,
-            f"intent '{req.intent.value}' is not yet automated (booking only in this phase)",
+            f"intent '{req.intent.value}' is not automated for this conversation",
         )
         return
 
@@ -385,6 +532,8 @@ async def start_request(
     payload: StartRequestIn,
     *,
     interpreter: Interpreter,
+    notification_service: NotificationService,
+    calendar_provider: CalendarProvider,
     now: datetime | None = None,
 ) -> ProcessingRun:
     now = now or datetime.now(UTC)
@@ -417,7 +566,17 @@ async def start_request(
     await _transition(db, run, ProcessingRunState.INTERPRETING)
 
     known_services = await _known_services(db, business.id)
-    await _interpret_and_route(db, run, business, known_services, payload.message, interpreter, now)
+    await _interpret_and_route(
+        db,
+        run,
+        business,
+        known_services,
+        payload.message,
+        interpreter,
+        now,
+        notification_service=notification_service,
+        calendar_provider=calendar_provider,
+    )
     await db.commit()
     return run
 
@@ -428,6 +587,8 @@ async def reply_to_clarification(
     message: str,
     *,
     interpreter: Interpreter,
+    notification_service: NotificationService,
+    calendar_provider: CalendarProvider,
     now: datetime | None = None,
 ) -> ProcessingRun:
     now = now or datetime.now(UTC)
@@ -445,7 +606,17 @@ async def reply_to_clarification(
     await _log_step(db, run, "clarification_reply_received")
 
     known_services = await _known_services(db, business.id)
-    await _interpret_and_route(db, run, business, known_services, message, interpreter, now)
+    await _interpret_and_route(
+        db,
+        run,
+        business,
+        known_services,
+        message,
+        interpreter,
+        now,
+        notification_service=notification_service,
+        calendar_provider=calendar_provider,
+    )
     await db.commit()
     return run
 
@@ -482,6 +653,18 @@ async def confirm_slot(
 
     business = await db.get(Business, run.business_id)
     service = await db.get(Service, run.matched_service_id)
+
+    if run.target_appointment_id is not None:
+        return await _confirm_reschedule(
+            db,
+            run,
+            business=business,
+            service=service,
+            new_start_at=payload.start_at,
+            notification_service=notification_service,
+            calendar_provider=calendar_provider,
+            now=now,
+        )
 
     await _transition(db, run, ProcessingRunState.BOOKING)
     await _log_step(db, run, "booking_attempted")
@@ -554,6 +737,82 @@ async def confirm_slot(
 
     await _schedule_reminder(db, appointment, business)
     await _log_step(db, run, "reminder_scheduled")
+
+    await db.commit()
+    return run
+
+
+async def _confirm_reschedule(
+    db: AsyncSession,
+    run: ProcessingRun,
+    *,
+    business: Business,
+    service: Service,
+    new_start_at: datetime,
+    notification_service: NotificationService,
+    calendar_provider: CalendarProvider,
+    now: datetime,
+) -> ProcessingRun:
+    """The reschedule counterpart to the booking branch above: same
+    AWAITING_CONFIRMATION -> BOOKING transition and re-offer-on-conflict
+    behavior, but moves run.target_appointment_id in place via
+    domain.appointments.reschedule_appointment instead of creating a new
+    Appointment."""
+    await _transition(db, run, ProcessingRunState.BOOKING)
+    await _log_step(db, run, "reschedule_attempted")
+
+    try:
+        appointment = await domain_appointments.reschedule_appointment(
+            db, run.target_appointment_id, new_start_at, now=now
+        )
+    except SlotUnavailableError:
+        await _log_step(db, run, "slot_no_longer_available", {"start_at": new_start_at.isoformat()})
+        await _offer_slots_or_escalate(
+            db, run, business, service, now, resolved_date=run.resolved_date
+        )
+        await db.commit()
+        return run
+    except DomainError as exc:
+        await _escalate(db, run, str(exc))
+        return run
+
+    run.resulting_appointment_id = appointment.id
+    db.add(
+        AuditEvent(
+            processing_run_id=run.id,
+            entity_type="Appointment",
+            entity_id=appointment.id,
+            from_state="BOOKED",
+            to_state="BOOKED",
+            reason="rescheduled via workflow",
+        )
+    )
+    await _transition(db, run, ProcessingRunState.SUCCEEDED)
+    await _log_step(db, run, "reschedule_succeeded", {"appointment_id": str(appointment.id)})
+
+    staff = await db.get(StaffResource, appointment.staff_id)
+    customer = await db.get(Customer, run.customer_id)
+
+    # Same best-effort, never-blocking discipline as a fresh booking's
+    # calendar sync: a failure here is recorded and never undoes the
+    # reschedule, which already committed in Postgres.
+    await _sync_calendar_update(
+        db,
+        appointment,
+        business=business,
+        service=service,
+        staff=staff,
+        customer=customer,
+        calendar_provider=calendar_provider,
+        run=run,
+    )
+
+    await notification_service.send_reschedule_confirmation(
+        db, appointment=appointment, customer=customer, run=run
+    )
+    await _log_step(db, run, "reschedule_confirmation_sent")
+
+    await _reschedule_pending_reminder(db, appointment, business)
 
     await db.commit()
     return run
@@ -634,6 +893,146 @@ async def _sync_calendar(
     )
     if run is not None:
         await _log_step(db, run, "calendar_sync_succeeded", {"calendar_event_id": event_id})
+    await db.flush()
+
+
+async def _sync_calendar_update(
+    db: AsyncSession,
+    appointment: Appointment,
+    *,
+    business: Business,
+    service: Service,
+    staff: StaffResource,
+    customer: Customer,
+    calendar_provider: CalendarProvider,
+    run: ProcessingRun,
+) -> None:
+    """Mirrors a reschedule onto the calendar. If the original booking
+    never successfully synced (no calendar_event_id yet), there's nothing
+    to update -- falls back to creating the event fresh, the same
+    recovery a manual retry_calendar_sync would eventually do anyway."""
+    if appointment.calendar_event_id is None:
+        await _sync_calendar(
+            db,
+            appointment,
+            business=business,
+            service=service,
+            staff=staff,
+            customer=customer,
+            calendar_provider=calendar_provider,
+            run=run,
+        )
+        return
+
+    try:
+        await calendar_provider.update_event(
+            calendar_event_id=appointment.calendar_event_id,
+            appointment=appointment,
+            business=business,
+            service=service,
+            staff=staff,
+            customer=customer,
+        )
+    except CalendarProviderError as exc:
+        appointment.calendar_sync_status = CalendarSyncStatus.FAILED
+        db.add(
+            AuditEvent(
+                processing_run_id=run.id,
+                entity_type="Appointment",
+                entity_id=appointment.id,
+                from_state="calendar_sync:SYNCED",
+                to_state="calendar_sync:FAILED",
+                reason=str(exc),
+            )
+        )
+        await _log_step(db, run, "calendar_sync_failed", {"error": str(exc)})
+        await db.flush()
+        return
+
+    appointment.calendar_sync_status = CalendarSyncStatus.SYNCED
+    db.add(
+        AuditEvent(
+            processing_run_id=run.id,
+            entity_type="Appointment",
+            entity_id=appointment.id,
+            from_state="calendar_sync:SYNCED",
+            to_state="calendar_sync:SYNCED",
+            reason="reschedule mirrored to calendar",
+        )
+    )
+    await _log_step(
+        db, run, "calendar_sync_succeeded", {"calendar_event_id": appointment.calendar_event_id}
+    )
+    await db.flush()
+
+
+async def _sync_calendar_cancel(
+    db: AsyncSession,
+    appointment: Appointment,
+    *,
+    calendar_provider: CalendarProvider,
+    run: ProcessingRun,
+) -> None:
+    """Best-effort calendar cancellation -- never undoes the Postgres
+    cancellation, which has already committed by the time this runs. If
+    the appointment never had a synced event, there's nothing to cancel
+    on the provider's side."""
+    if appointment.calendar_event_id is None:
+        return
+
+    try:
+        await calendar_provider.cancel_event(calendar_event_id=appointment.calendar_event_id)
+    except CalendarProviderError as exc:
+        db.add(
+            AuditEvent(
+                processing_run_id=run.id,
+                entity_type="Appointment",
+                entity_id=appointment.id,
+                from_state="calendar_sync:SYNCED",
+                to_state="calendar_sync:FAILED",
+                reason=str(exc),
+            )
+        )
+        await _log_step(db, run, "calendar_cancel_failed", {"error": str(exc)})
+        await db.flush()
+        return
+
+    db.add(
+        AuditEvent(
+            processing_run_id=run.id,
+            entity_type="Appointment",
+            entity_id=appointment.id,
+            from_state="calendar_sync:SYNCED",
+            to_state="calendar_sync:CANCELLED",
+            reason="cancellation mirrored to calendar",
+        )
+    )
+    await _log_step(
+        db, run, "calendar_cancel_succeeded", {"calendar_event_id": appointment.calendar_event_id}
+    )
+    await db.flush()
+
+
+async def _reschedule_pending_reminder(
+    db: AsyncSession, appointment: Appointment, business: Business
+) -> None:
+    """A SEND_REMINDER job scheduled at the appointment's original
+    start_at is now scheduled for the wrong time -- move it, rather than
+    let it fire (or not) relative to a start_at this appointment no
+    longer has. A job that's already DONE, LOCKED, or otherwise not
+    PENDING is left alone: nothing to reschedule."""
+    job = (
+        await db.execute(
+            select(ScheduledJob).where(
+                ScheduledJob.job_type == ScheduledJobType.SEND_REMINDER,
+                ScheduledJob.status == ScheduledJobStatus.PENDING,
+                ScheduledJob.payload["appointment_id"].astext == str(appointment.id),
+            )
+        )
+    ).scalar_one_or_none()
+    if job is None:
+        return
+    job.run_at = appointment.start_at - timedelta(hours=business.reminder_lead_hours)
     await db.flush()
 
 

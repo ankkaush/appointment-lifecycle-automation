@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -108,7 +109,9 @@ async def _blocked_windows(
     return [TimeWindow(s, e) for s, e in rows]
 
 
-async def _booked_windows(db: AsyncSession, staff_id, bound: TimeWindow) -> list[TimeWindow]:
+async def _booked_windows(
+    db: AsyncSession, staff_id, bound: TimeWindow, *, exclude_appointment_id: UUID | None = None
+) -> list[TimeWindow]:
     stmt = (
         select(Appointment.start_at, Appointment.end_at, Service.buffer_minutes)
         .join(Service, Service.id == Appointment.service_id)
@@ -119,6 +122,14 @@ async def _booked_windows(db: AsyncSession, staff_id, bound: TimeWindow) -> list
             Appointment.end_at > bound.start,
         )
     )
+    if exclude_appointment_id is not None:
+        # Rescheduling re-checks availability while the appointment being
+        # moved is still sitting BOOKED at its *old* time -- without this,
+        # a move to a nearby slot could be falsely rejected as colliding
+        # with itself. The exclusion constraint (a pairwise, cross-row
+        # guarantee) never has this problem; only this in-process
+        # re-check does.
+        stmt = stmt.where(Appointment.id != exclude_appointment_id)
     rows = (await db.execute(stmt)).all()
     return [_effective_window(s, e, b) for s, e, b in rows]
 
@@ -132,11 +143,17 @@ async def list_available_slots(
     window_start: datetime,
     window_end: datetime,
     now: datetime,
+    exclude_appointment_id: UUID | None = None,
 ) -> list[SlotCandidate]:
     """Working hours, minus blocked periods, minus existing bookings (with
     buffer), clipped to the business's booking-notice / booking-horizon
     policy. Deterministic and side-effect-free: the same inputs always
     produce the same slots.
+
+    `exclude_appointment_id` is for rescheduling only (app.domain.
+    appointments.reschedule_appointment): it leaves the appointment being
+    moved out of its own conflict check. Every other caller leaves it
+    unset.
     """
     tz = ZoneInfo(business.timezone)
     duration = timedelta(minutes=service.duration_minutes)
@@ -153,7 +170,9 @@ async def list_available_slots(
     hours = [w for w in hours if w.start < w.end]
 
     blocked = await _blocked_windows(db, business.id, staff.id, bound)
-    booked = await _booked_windows(db, staff.id, bound)
+    booked = await _booked_windows(
+        db, staff.id, bound, exclude_appointment_id=exclude_appointment_id
+    )
     free = _subtract(hours, blocked + booked)
 
     slots: list[SlotCandidate] = []
@@ -173,6 +192,7 @@ async def is_slot_available(
     staff: StaffResource,
     start_at: datetime,
     now: datetime,
+    exclude_appointment_id: UUID | None = None,
 ) -> bool:
     """The single-slot check the booking engine re-runs at commit time,
     regardless of what was offered earlier (architecture baseline,
@@ -186,5 +206,6 @@ async def is_slot_available(
         window_start=start_at,
         window_end=end_at,
         now=now,
+        exclude_appointment_id=exclude_appointment_id,
     )
     return any(s.start_at == start_at and s.end_at == end_at for s in slots)

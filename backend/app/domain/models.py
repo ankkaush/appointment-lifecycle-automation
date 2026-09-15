@@ -64,6 +64,12 @@ class Business(Base):
     )
     # How long before an appointment's start time the reminder job fires.
     reminder_lead_hours: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=24)
+    # Shared policy for both cancellation and rescheduling (Phase 7): an
+    # appointment inside this many hours of its start_at may not be
+    # cancelled or moved through the automated flow -- one knob, not two,
+    # since the two actions carry the same "how much notice do we need"
+    # question.
+    min_reschedule_notice_hours: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=24)
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=func.now()
     )

@@ -48,6 +48,27 @@ class NotificationService(Protocol):
         ProcessingRun this outreach opens, not the original booking's."""
         ...
 
+    async def send_cancellation(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+        run: ProcessingRun,
+    ) -> Notification: ...
+
+    async def send_reschedule_confirmation(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+        run: ProcessingRun,
+    ) -> Notification:
+        """`appointment` is the same row as before, at its new start_at --
+        rescheduling moves it in place rather than creating a new one."""
+        ...
+
 
 class MockNotificationProvider:
     """Persists a Notification row without contacting any real provider --
@@ -113,6 +134,51 @@ class MockNotificationProvider:
                 f"Sorry we missed you for your {appointment.start_at.isoformat()} (UTC) "
                 "appointment -- would you like to reschedule?"
             ),
+            status=NotificationStatus.SENT,
+        )
+        db.add(notification)
+        await db.flush()
+        return notification
+
+    async def send_cancellation(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+        run: ProcessingRun,
+    ) -> Notification:
+        notification = Notification(
+            processing_run_id=run.id,
+            appointment_id=appointment.id,
+            channel="mock",
+            to_contact=customer.contact,
+            subject="Appointment cancelled",
+            body=(
+                f"Your appointment for {appointment.start_at.isoformat()} (UTC) has been "
+                "cancelled."
+            ),
+            status=NotificationStatus.SENT,
+        )
+        db.add(notification)
+        await db.flush()
+        return notification
+
+    async def send_reschedule_confirmation(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+        run: ProcessingRun,
+    ) -> Notification:
+        notification = Notification(
+            processing_run_id=run.id,
+            appointment_id=appointment.id,
+            channel="mock",
+            to_contact=customer.contact,
+            subject="Appointment rescheduled",
+            body=(f"Your appointment has been moved to {appointment.start_at.isoformat()} (UTC)."),
             status=NotificationStatus.SENT,
         )
         db.add(notification)

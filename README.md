@@ -20,8 +20,8 @@ Architecture proposed and reviewed; implementation in progress.
 - [x] Phase 3 — workflow engine, audit trail, notification interface
 - [x] Phase 4 — customer web chat (bounded clarification loop + thin chat UI)
 - [x] Phase 5 — calendar provider abstraction (mock; Google Calendar deferred)
-- [x] **Phase 6** — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
-- [ ] Phase 7 — cancellation & rescheduling
+- [x] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
+- [x] **Phase 7** — cancellation & rescheduling
 - [ ] Phase 8 — real notification provider
 - [ ] Phase 9 — business dashboard
 - [ ] Phase 10 — security hardening, full evaluation suite, deployment
@@ -179,6 +179,46 @@ the new `Appointment.rebooked_from_id`; the original stays immutably
 `app/workflow/calendar.py`, and `app/workflow/clarify.py` are all
 untouched — confirmed via `git diff --stat` showing zero changes to any
 of them. No live Anthropic calls in this phase's implementation.
+
+Phase 7 detail: `app/domain/appointments.py` adds `cancel_appointment` and
+`reschedule_appointment`, the two mutations that act on an existing,
+already-BOOKED `Appointment` in place rather than creating a new one --
+rescheduling preserves the same row, same id, same history. Both share one
+policy predicate, `can_modify`, gated on a single new setting,
+`Business.min_reschedule_notice_hours` (cancellation and rescheduling
+share one notice-window knob, not two, since they ask the same "how much
+notice do we need" question). Rescheduling reuses `booking.py`'s two-layer
+concurrency discipline -- a deterministic availability re-check, backed by
+the real guarantee, the same Postgres exclusion constraint -- without
+duplicating `booking.py`'s insert path or touching it; the one shared
+change `availability.py` needed was an optional `exclude_appointment_id`,
+so a reschedule's re-check doesn't collide with the very row it's moving.
+
+Resolving *which* appointment a cancel/reschedule request means is
+deliberately simple for the MVP, per the approved design: exactly one
+upcoming `BOOKED` appointment is acted on automatically; zero or several
+is a clean escalation, not a second clarification conversation -- the
+data model still allows a customer to have more than one appointment, this
+is only the automated flow declining to guess. `app/workflow/orchestrator.py`
+routes a confident (non-ambiguous) `CANCEL`/`RESCHEDULE` intent to this
+policy check; an *ambiguous* one still falls through to the same immediate
+escalation a confident unacceptable intent gets today -- Phase 7
+deliberately doesn't extend the bounded clarification loop to "which
+appointment" or "cancel vs. reschedule" uncertainty. A successful
+reschedule reuses the exact same slot-offering / `AWAITING_CONFIRMATION`
+machinery a fresh booking uses (a new `ProcessingRun.target_appointment_id`
+field tells `confirm_slot` to move the existing appointment instead of
+booking a new one); a successful cancellation is immediate and
+deterministic, with no offer/confirm step needed. Both call
+`CalendarProvider.update_event()` / `cancel_event()` (defined since Phase
+5, unused until now) with the same best-effort, never-blocking discipline
+as Phase 5's `create_event` sync -- a calendar failure is recorded and
+retryable, never a reason to undo a cancellation or reschedule that already
+committed in Postgres. A reschedule also moves the appointment's pending
+`SEND_REMINDER` job to the new time, so Phase 6's reminder doesn't fire
+against a start time that no longer exists. `app/domain/availability.py`'s
+one addition aside, `app/domain/booking.py` and `app/domain/noshow.py` are
+untouched. No live Anthropic calls in this phase's implementation.
 
 ## Stack
 

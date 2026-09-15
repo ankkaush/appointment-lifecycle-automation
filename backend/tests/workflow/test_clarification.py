@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.schemas import AIInvocationMetadata, Intent, InterpretationOutcome, InterpretedRequest
 from app.domain.models import Business, Customer, Service, StaffResource
 from app.workflow import orchestrator
+from app.workflow.calendar import MockCalendarProvider
 from app.workflow.exceptions import ProcessingRunStateError
 from app.workflow.models import EscalationCase, ProcessingRunState
+from app.workflow.notifications import MockNotificationProvider
 from app.workflow.schemas import StartRequestIn
 
 # The internal diagnostic reason -- never shown to the customer directly
@@ -73,7 +75,13 @@ async def test_ambiguous_request_asks_one_clarifying_question(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Can I come Friday?"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     assert run.state == ProcessingRunState.AWAITING_CLARIFICATION
     assert run.clarification_rounds == 1
@@ -92,11 +100,22 @@ async def test_reply_resolves_ambiguity_and_offers_slots(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Can I come Friday?"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     assert run.state == ProcessingRunState.AWAITING_CLARIFICATION
 
     result = await orchestrator.reply_to_clarification(
-        db, run.id, "I want to book a Haircut", interpreter=stub
+        db,
+        run.id,
+        "I want to book a Haircut",
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
     )
 
     assert result.state == ProcessingRunState.AWAITING_CONFIRMATION
@@ -113,15 +132,35 @@ async def test_still_ambiguous_after_cap_escalates(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Can I come Friday?"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     assert run.state == ProcessingRunState.AWAITING_CLARIFICATION
     assert run.clarification_rounds == 1
 
-    run = await orchestrator.reply_to_clarification(db, run.id, "still not sure", interpreter=stub)
+    run = await orchestrator.reply_to_clarification(
+        db,
+        run.id,
+        "still not sure",
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     assert run.state == ProcessingRunState.AWAITING_CLARIFICATION
     assert run.clarification_rounds == 2
 
-    run = await orchestrator.reply_to_clarification(db, run.id, "still not sure", interpreter=stub)
+    run = await orchestrator.reply_to_clarification(
+        db,
+        run.id,
+        "still not sure",
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     assert run.state == ProcessingRunState.ESCALATED
 
     case = (
@@ -139,12 +178,23 @@ async def test_reply_rejected_when_run_not_awaiting_clarification(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     assert run.state == ProcessingRunState.AWAITING_CONFIRMATION
 
     with pytest.raises(ProcessingRunStateError):
         await orchestrator.reply_to_clarification(
-            db, run.id, "anything", interpreter=FakeInterpreter()
+            db,
+            run.id,
+            "anything",
+            interpreter=FakeInterpreter(),
+            notification_service=MockNotificationProvider(),
+            calendar_provider=MockCalendarProvider(),
         )
 
 
@@ -163,7 +213,13 @@ async def test_intent_ambiguous_with_book_candidate_asks_disambiguation(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Can I come Friday?"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     assert run.state == ProcessingRunState.AWAITING_CLARIFICATION
     assert run.clarification_rounds == 1
@@ -186,7 +242,13 @@ async def test_ambiguous_without_book_candidate_still_escalates_immediately(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="something about my appointment"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     assert run.state == ProcessingRunState.ESCALATED
     assert run.clarification_rounds == 0

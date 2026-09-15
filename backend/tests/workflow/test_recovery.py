@@ -52,7 +52,13 @@ async def _book_appointment_only(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     chosen = run.offered_slots[0]
     confirm_payload = ConfirmSlotIn(
         start_at=datetime.fromisoformat(chosen["start_at"]), idempotency_key=str(uuid4())
@@ -113,7 +119,12 @@ async def test_recovery_reply_resolves_and_rebooks(
         [InterpretedRequest(intent=Intent.RESCHEDULE, is_ambiguous=False, confidence=0.9)]
     )
     replied = await orchestrator.reply_to_clarification(
-        db, recovery_run.id, "Can I come Thursday afternoon instead?", interpreter=stub
+        db,
+        recovery_run.id,
+        "Can I come Thursday afternoon instead?",
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
     )
 
     assert replied.state == ProcessingRunState.AWAITING_CONFIRMATION
@@ -154,7 +165,13 @@ async def test_reschedule_intent_accepted_for_recovery_but_escalates_for_ordinar
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Can I move my appointment?"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     assert run.state == ProcessingRunState.ESCALATED
 
 
@@ -181,13 +198,23 @@ async def test_recovery_reply_still_ambiguous_can_be_clarified(
         ]
     )
     first = await orchestrator.reply_to_clarification(
-        db, recovery_run.id, "yes I'd like to", interpreter=stub
+        db,
+        recovery_run.id,
+        "yes I'd like to",
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
     )
     assert first.state == ProcessingRunState.AWAITING_CLARIFICATION
     assert first.clarification_rounds == 1
 
     second = await orchestrator.reply_to_clarification(
-        db, recovery_run.id, "Thursday afternoon", interpreter=stub
+        db,
+        recovery_run.id,
+        "Thursday afternoon",
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
     )
     assert second.state == ProcessingRunState.AWAITING_CONFIRMATION
 

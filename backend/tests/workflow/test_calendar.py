@@ -66,7 +66,13 @@ async def _start_and_offer(db: AsyncSession, business: Business, customer: Custo
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     chosen = run.offered_slots[0]
     confirm_payload = ConfirmSlotIn(
         start_at=datetime.fromisoformat(chosen["start_at"]), idempotency_key=str(uuid4())

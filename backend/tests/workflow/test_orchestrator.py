@@ -70,7 +70,13 @@ async def test_start_request_offers_slots_for_clear_booking_message(
         customer_id=customer.id,
         message="I'd like to book a Haircut appointment please",
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     assert run.state == ProcessingRunState.AWAITING_CONFIRMATION
     assert run.matched_service_id == service.id
@@ -94,7 +100,13 @@ async def test_start_request_escalates_on_unrecognized_message(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="asdkfj qwer 1234"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     assert run.state == ProcessingRunState.ESCALATED
     case = (
@@ -110,7 +122,13 @@ async def test_start_request_escalates_non_book_intent(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Can I cancel my appointment?"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     assert run.state == ProcessingRunState.ESCALATED
     steps = await _steps(db, run.id)
@@ -136,7 +154,13 @@ async def test_start_request_escalates_unmatched_service(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Can I get a manicure?"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=stub)
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=stub,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     assert run.state == ProcessingRunState.ESCALATED
     case = (
@@ -152,7 +176,13 @@ async def test_confirm_slot_success_books_and_notifies(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     chosen = run.offered_slots[0]
 
     confirm_payload = ConfirmSlotIn(
@@ -191,7 +221,13 @@ async def test_confirm_slot_rejects_choice_not_offered(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
 
     bogus_time = datetime.now(UTC) + timedelta(days=365)
     confirm_payload = ConfirmSlotIn(start_at=bogus_time, idempotency_key=str(uuid4()))
@@ -213,7 +249,13 @@ async def test_confirm_slot_reoffers_when_concurrently_taken(
     payload = StartRequestIn(
         business_id=business.id, customer_id=customer.id, message="Book me a Haircut please"
     )
-    run = await orchestrator.start_request(db, payload, interpreter=FakeInterpreter())
+    run = await orchestrator.start_request(
+        db,
+        payload,
+        interpreter=FakeInterpreter(),
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
+    )
     original_offer = run.offered_slots[0]
     original_start = datetime.fromisoformat(original_offer["start_at"])
 

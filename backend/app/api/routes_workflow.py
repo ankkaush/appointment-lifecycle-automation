@@ -65,9 +65,17 @@ async def create_request(
     payload: StartRequestIn,
     db: AsyncSession = Depends(get_db),
     interpreter: Interpreter = Depends(get_interpreter),
+    notification_service: NotificationService = Depends(get_notification_service),
+    calendar_provider: CalendarProvider = Depends(get_calendar_provider),
 ) -> ProcessingRun:
     try:
-        return await start_request(db, payload, interpreter=interpreter)
+        return await start_request(
+            db,
+            payload,
+            interpreter=interpreter,
+            notification_service=notification_service,
+            calendar_provider=calendar_provider,
+        )
     except DomainError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -82,10 +90,17 @@ async def reply_request(
     payload: ReplyIn,
     db: AsyncSession = Depends(get_db),
     interpreter: Interpreter = Depends(get_interpreter),
+    notification_service: NotificationService = Depends(get_notification_service),
+    calendar_provider: CalendarProvider = Depends(get_calendar_provider),
 ) -> ProcessingRun:
     try:
         return await reply_to_clarification(
-            db, processing_run_id, payload.message, interpreter=interpreter
+            db,
+            processing_run_id,
+            payload.message,
+            interpreter=interpreter,
+            notification_service=notification_service,
+            calendar_provider=calendar_provider,
         )
     except WorkflowError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

@@ -95,6 +95,16 @@ class ProcessingRun(Base):
     recovery_of_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("appointments.id", ondelete="CASCADE"), nullable=True
     )
+    # Set only for an ordinary (kind=CUSTOMER_INITIATED) CANCEL/RESCHEDULE
+    # run -- the customer's single upcoming appointment this run resolves
+    # to act on. Deliberately a separate field from
+    # recovery_of_appointment_id: that one means "the NO_SHOW appointment
+    # this run is trying to recover," a different relationship with a
+    # different lifecycle, and Phase 7 doesn't broaden it to also mean
+    # this.
+    target_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), nullable=True
+    )
     matched_service_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("services.id", ondelete="RESTRICT"), nullable=True
     )
@@ -235,7 +245,7 @@ class EscalationCase(Base):
 
 class Notification(Base):
     """A sent (or attempted) customer communication. channel/provider is
-    "mock" until Phase 7's real provider lands -- workflow code depends on
+    "mock" until Phase 8's real provider lands -- workflow code depends on
     the NotificationService Protocol in notifications.py, never a vendor."""
 
     __tablename__ = "notifications"

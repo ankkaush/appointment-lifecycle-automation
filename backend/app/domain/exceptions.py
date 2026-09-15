@@ -24,3 +24,9 @@ class SlotUnavailableError(DomainError):
     a blocked period, already booked, or outside the booking-notice /
     booking-horizon window. Also the error a concurrent booking race
     resolves to for the losing request."""
+
+
+class AppointmentNotModifiableError(DomainError):
+    """Raised by cancel_appointment / reschedule_appointment when the
+    appointment isn't BOOKED, or is inside Business.min_reschedule_notice_hours
+    of its start_at."""

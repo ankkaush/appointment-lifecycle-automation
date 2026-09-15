@@ -19,7 +19,13 @@ TRANSITIONS: dict[S, frozenset[S]] = {
     # after a clarification reply (AWAITING_CLARIFICATION -> INTERPRETING)
     # -- the post-interpretation routing decision (offer / clarify /
     # escalate) always happens from here, one place, regardless of entry.
-    S.INTERPRETING: frozenset({S.SLOTS_OFFERED, S.AWAITING_CLARIFICATION, S.ESCALATED, S.FAILED}),
+    # INTERPRETING -> SUCCEEDED is Phase 7's cancellation path: unlike
+    # booking or rescheduling, there's nothing to offer or confirm --
+    # once the intent is resolved and the notice-window policy check
+    # passes, the cancellation is deterministic and immediate.
+    S.INTERPRETING: frozenset(
+        {S.SLOTS_OFFERED, S.AWAITING_CLARIFICATION, S.SUCCEEDED, S.ESCALATED, S.FAILED}
+    ),
     # Bounded: capped at MAX_CLARIFICATION_ROUNDS in orchestrator.py, not
     # an open-ended loop. EXPIRED is for a future background-job sweep
     # (Phase 6) of abandoned conversations -- not wired to a timer yet.
