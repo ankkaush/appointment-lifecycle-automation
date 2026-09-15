@@ -98,3 +98,21 @@ class EscalationCaseOut(BaseModel):
     status: str
     created_at: datetime
     resolved_at: datetime | None
+
+
+class EscalationQueueItemOut(BaseModel):
+    """The dashboard-facing shape (Phase 9): an EscalationCase alone is an
+    opaque processing_run_id and a reason -- not enough for a human to
+    actually act on. This joins through ProcessingRun to the customer who
+    needs following up and what they originally asked, so the queue is
+    actionable, not just a list of ids."""
+
+    id: UUID
+    processing_run_id: UUID
+    reason: str
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None
+    customer_name: str
+    customer_contact: str
+    raw_message: str

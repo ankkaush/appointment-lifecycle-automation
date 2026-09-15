@@ -53,5 +53,24 @@ services:
       - ./backend:/app
     command: python -m app.worker
 
+  # Business dashboard (Phase 9): a separate Next.js app, its own
+  # process and origin -- the API's CORSMiddleware (see app/main.py) is
+  # what lets it call across. No login yet; see README, Phase 9.
+  dashboard:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8010
+    ports:
+      - "3010:3000"
+    depends_on:
+      - api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev -- -p 3000
+
 volumes:
   db_data:

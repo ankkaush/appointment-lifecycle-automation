@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
@@ -6,9 +7,21 @@ from app.api.routes import router as domain_router
 from app.api.routes_ai import router as ai_router
 from app.api.routes_jobs import router as jobs_router
 from app.api.routes_workflow import router as workflow_router
+from app.core.config import get_settings
 from app.core.db import engine
 
 app = FastAPI(title="Appointment Lifecycle Automation", version="0.1.0")
+
+# The chat UI (Phase 4) is same-origin -- mounted directly below, no CORS
+# needed. The Phase 9 dashboard is a separate Next.js app on its own
+# origin/port, the first cross-origin browser client this API has had.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[get_settings().dashboard_origin],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
 app.include_router(domain_router, prefix="/v1", tags=["domain"])
 app.include_router(ai_router, prefix="/v1", tags=["ai"])
 app.include_router(workflow_router, prefix="/v1", tags=["workflow"])

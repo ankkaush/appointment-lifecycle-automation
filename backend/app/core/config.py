@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     resend_api_key: str | None = None
     resend_from_email: str | None = None
 
+    # The Phase 9 dashboard's origin, for CORS -- one value is enough
+    # since there's exactly one first-party frontend consuming this API
+    # cross-origin (the chat UI is same-origin, mounted directly below).
+    dashboard_origin: str = "http://localhost:3010"
+
     sentry_dsn: str | None = None
 
 

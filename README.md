@@ -22,8 +22,8 @@ Architecture proposed and reviewed; implementation in progress.
 - [x] Phase 5 — calendar provider abstraction (mock; Google Calendar deferred)
 - [x] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
 - [x] Phase 7 — cancellation & rescheduling
-- [x] **Phase 8** — real notification provider
-- [ ] Phase 9 — business dashboard
+- [x] Phase 8 — real notification provider
+- [x] **Phase 9** — business dashboard
 - [ ] Phase 10 — security hardening, full evaluation suite, deployment
 
 Phase 1 detail: `app/domain/` holds the business/service/staff/customer/
@@ -262,6 +262,39 @@ real network call, and a real deployment can supply real credentials via
 `.env` (`RESEND_API_KEY`, `RESEND_FROM_EMAIL`) without any code changes.
 No live Anthropic calls in this phase's implementation.
 
+Phase 9 detail: `frontend/` is a new Next.js (App Router, TypeScript) app --
+the first frontend infrastructure in this codebase beyond the framework-
+free chat UI. It's a single Client Component page (`app/page.tsx`)
+showing one business's escalation queue: reason, customer name/contact,
+the original message, and a Resolve action, talking directly to the
+existing `GET /v1/escalations` / `POST /v1/escalations/{id}/resolve`
+endpoints through a thin typed wrapper (`lib/api.ts`).
+
+No login exists anywhere in this system yet, and building one was
+explicitly out of scope for this phase (that's real auth, Phase 10's
+"security hardening"). Given that, the dashboard trusts a `business_id`
+the same way the rest of the API already does -- entered by hand for now,
+persisted in the browser's `localStorage` for convenience across reloads.
+That surfaced a real, pre-existing gap rather than one this phase
+introduced: `GET /v1/escalations` had no business scoping at all before
+now -- any caller could see every business's escalation queue. Both
+endpoints now require `business_id` and filter/verify by it; resolving an
+escalation for the wrong business returns the same 404 as one that
+doesn't exist, rather than confirming which UUIDs are real for someone
+else's business. The list endpoint also gained a proper response shape
+(`EscalationQueueItemOut`, joined through `ProcessingRun` to `Customer`)
+-- the original `EscalationCaseOut` was just an opaque `processing_run_id`
+and a reason, not enough for a human to act on.
+
+`app/main.py` gained `CORSMiddleware`, scoped to the dashboard's origin
+only -- the first cross-origin browser client this API has ever had (the
+chat UI is same-origin, mounted directly into the FastAPI app). A new
+`dashboard` service in `docker-compose.yml` runs the Next.js dev server
+on port 3010, alongside `db`/`api`/`worker`, wired the same way: build
+context, volume-mounted source, no new infrastructure component beyond
+the one new container. No live Anthropic calls in this phase's
+implementation.
+
 ## Stack
 
 FastAPI · PostgreSQL · SQLAlchemy (async) · Alembic · Docker Compose ·
@@ -278,7 +311,18 @@ The API comes up at `http://localhost:8010` (mapped off the default 8000/5432
 to avoid clashing with other local projects — see `docker-compose.yml`);
 `GET /health` checks both the process and the database connection. Postgres
 itself is reachable from the host at `localhost:5436` if you need to inspect
-it directly (e.g. with `psql`).
+it directly (e.g. with `psql`). The business dashboard comes up at
+`http://localhost:3010` — enter a `business_id` (from `POST /v1/businesses`)
+to see that business's escalation queue.
+
+Running the frontend directly (outside Docker):
+
+```bash
+cd frontend
+cp .env.local.example .env.local
+npm install
+npm run dev -- -p 3010
+```
 
 Running tests and linters directly:
 

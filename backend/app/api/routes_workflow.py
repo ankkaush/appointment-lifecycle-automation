@@ -15,7 +15,7 @@ from app.ai.interpreter import Interpreter
 from app.api.rate_limit import enforce_chat_rate_limit
 from app.core.db import get_db
 from app.domain.exceptions import DomainError
-from app.domain.models import Appointment
+from app.domain.models import Appointment, Customer
 from app.domain.schemas import AppointmentOut
 from app.workflow.calendar import CalendarProvider, MockCalendarProvider
 from app.workflow.exceptions import WorkflowError
@@ -38,6 +38,7 @@ from app.workflow.schemas import (
     AIInvocationOut,
     ConfirmSlotIn,
     EscalationCaseOut,
+    EscalationQueueItemOut,
     ProcessingRunOut,
     ProcessingRunTraceOut,
     ReplyIn,
@@ -167,22 +168,55 @@ async def get_trace(
     )
 
 
-@router.get("/escalations", response_model=list[EscalationCaseOut])
+@router.get("/escalations", response_model=list[EscalationQueueItemOut])
 async def list_escalations(
-    status_filter: EscalationStatus | None = None, db: AsyncSession = Depends(get_db)
-) -> list[EscalationCase]:
-    stmt = select(EscalationCase).order_by(EscalationCase.created_at.desc())
+    business_id: UUID,
+    status_filter: EscalationStatus | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> list[EscalationQueueItemOut]:
+    # business_id is required and joined-through-filtered here, not
+    # optional -- this endpoint used to return every business's
+    # escalations to any caller. Phase 9 is the first real dashboard
+    # consumer, and a dashboard that could see another business's queue
+    # would be broken by construction.
+    stmt = (
+        select(EscalationCase, ProcessingRun, Customer)
+        .join(ProcessingRun, ProcessingRun.id == EscalationCase.processing_run_id)
+        .join(Customer, Customer.id == ProcessingRun.customer_id)
+        .where(ProcessingRun.business_id == business_id)
+        .order_by(EscalationCase.created_at.desc())
+    )
     if status_filter is not None:
         stmt = stmt.where(EscalationCase.status == status_filter)
-    return list((await db.execute(stmt)).scalars().all())
+    rows = (await db.execute(stmt)).all()
+    return [
+        EscalationQueueItemOut(
+            id=case.id,
+            processing_run_id=case.processing_run_id,
+            reason=case.reason,
+            status=case.status.value,
+            created_at=case.created_at,
+            resolved_at=case.resolved_at,
+            customer_name=customer.name,
+            customer_contact=customer.contact,
+            raw_message=run.raw_message,
+        )
+        for case, run, customer in rows
+    ]
 
 
 @router.post("/escalations/{escalation_id}/resolve", response_model=EscalationCaseOut)
 async def resolve_escalation(
-    escalation_id: UUID, db: AsyncSession = Depends(get_db)
+    escalation_id: UUID, business_id: UUID, db: AsyncSession = Depends(get_db)
 ) -> EscalationCase:
     case = await db.get(EscalationCase, escalation_id)
     if case is None:
+        raise HTTPException(status_code=404, detail="EscalationCase not found")
+    run = await db.get(ProcessingRun, case.processing_run_id)
+    if run is None or run.business_id != business_id:
+        # Same 404 as "doesn't exist" -- a mismatched business_id learns
+        # nothing about whether the escalation_id is real for someone
+        # else's business.
         raise HTTPException(status_code=404, detail="EscalationCase not found")
     case.status = EscalationStatus.RESOLVED
     case.resolved_at = datetime.now(UTC)

@@ -81,12 +81,21 @@ async def test_escalation_flow_via_http(business: Business, customer: Customer) 
         run = create_resp.json()
         assert run["state"] == "ESCALATED"
 
-        list_resp = await client.get("/v1/escalations", params={"status_filter": "OPEN"})
+        list_resp = await client.get(
+            "/v1/escalations",
+            params={"business_id": str(business.id), "status_filter": "OPEN"},
+        )
         assert list_resp.status_code == 200
         cases = list_resp.json()
         matching = [c for c in cases if c["processing_run_id"] == run["id"]]
         assert len(matching) == 1
+        assert matching[0]["customer_name"] == customer.name
+        assert matching[0]["customer_contact"] == customer.contact
+        assert matching[0]["raw_message"] == "asdkfj qwer 1234"
 
-        resolve_resp = await client.post(f"/v1/escalations/{matching[0]['id']}/resolve")
+        resolve_resp = await client.post(
+            f"/v1/escalations/{matching[0]['id']}/resolve",
+            params={"business_id": str(business.id)},
+        )
         assert resolve_resp.status_code == 200
         assert resolve_resp.json()["status"] == "RESOLVED"
