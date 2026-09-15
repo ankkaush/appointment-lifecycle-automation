@@ -19,8 +19,8 @@ Architecture proposed and reviewed; implementation in progress.
 - [x] Phase 2 — AI interpretation layer + golden-set evaluation
 - [x] Phase 3 — workflow engine, audit trail, notification interface
 - [x] Phase 4 — customer web chat (bounded clarification loop + thin chat UI)
-- [x] **Phase 5** — calendar provider abstraction (mock; Google Calendar deferred)
-- [ ] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
+- [x] Phase 5 — calendar provider abstraction (mock; Google Calendar deferred)
+- [x] **Phase 6** — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
 - [ ] Phase 7 — cancellation & rescheduling
 - [ ] Phase 8 — real notification provider
 - [ ] Phase 9 — business dashboard
@@ -146,6 +146,39 @@ even calls the provider. `app/domain/availability.py` and
 `app/domain/booking.py` are untouched — the calendar has no path back
 into availability or conflict-prevention logic. No live Anthropic calls
 in this phase's implementation.
+
+Phase 6 detail: `app/workflow/jobs.py` splits background work into two
+shapes -- `ScheduledJob` (one-off, entity-specific: currently just
+`SEND_REMINDER`, claimed with `SELECT ... FOR UPDATE SKIP LOCKED` so more
+than one worker process can run safely) and plain periodic sweep
+functions for recurring maintenance (no-show detection, expiring
+abandoned runs), which don't need a row per run. `app/worker.py` is a
+second process running the same image on a 60s poll loop -- no Redis, no
+broker, coordinating purely through Postgres, per the standing
+instruction against unnecessary infrastructure; `POST
+/v1/jobs/run-tick` runs the same logic on demand. `app/domain/noshow.py`
+implements the deterministic no-show rule designed back in the
+architecture review (`now > end_at + grace_period → NO_SHOW`) as a pure
+predicate.
+
+The most novel piece: no-show recovery reuses Phase 4's clarification
+machinery almost entirely rather than duplicating it. A `ProcessingRun`
+gained a `kind` (`CUSTOMER_INITIATED`/`RECOVERY`) and
+`recovery_of_appointment_id`; a recovery run is created by the system
+(not a customer message), pre-fills `matched_service_id` from the missed
+appointment, and sits in `AWAITING_CLARIFICATION` waiting on a reply
+through the exact same `reply_to_clarification` / `POST /reply` path a
+clarifying question uses -- no parallel endpoint, no parallel state. One
+deliberate widening: a recovery run accepts `RESCHEDULE` intent as well
+as `BOOK` (an ordinary run still only accepts `BOOK` -- confirmed by
+test), since a customer replying "Thursday instead?" to a recovery
+message and a customer saying "book me for Thursday" mean the same thing
+here, whichever word the model reaches for. A successful rebooking sets
+the new `Appointment.rebooked_from_id`; the original stays immutably
+`NO_SHOW`. `app/domain/availability.py`, `app/domain/booking.py`,
+`app/workflow/calendar.py`, and `app/workflow/clarify.py` are all
+untouched — confirmed via `git diff --stat` showing zero changes to any
+of them. No live Anthropic calls in this phase's implementation.
 
 ## Stack
 

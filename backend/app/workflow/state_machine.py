@@ -10,7 +10,11 @@ from app.workflow.exceptions import InvalidTransitionError
 from app.workflow.models import ProcessingRunState as S
 
 TRANSITIONS: dict[S, frozenset[S]] = {
-    S.RECEIVED: frozenset({S.INTERPRETING}),
+    # RECEIVED -> AWAITING_CLARIFICATION (skipping INTERPRETING) is the
+    # no-show recovery path: the system speaks first (start_recovery),
+    # so there is nothing to interpret yet -- the run goes straight to
+    # waiting on the customer's reply.
+    S.RECEIVED: frozenset({S.INTERPRETING, S.AWAITING_CLARIFICATION}),
     # INTERPRETING is the hub state reached either fresh from RECEIVED or
     # after a clarification reply (AWAITING_CLARIFICATION -> INTERPRETING)
     # -- the post-interpretation routing decision (offer / clarify /

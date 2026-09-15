@@ -38,6 +38,19 @@ class ProcessingRunState(str, enum.Enum):
     EXPIRED = "EXPIRED"
 
 
+class ProcessingRunKind(str, enum.Enum):
+    """Almost every run is a customer starting a fresh conversation. A
+    no-show recovery outreach is the one exception -- the system speaks
+    first, and the reply is interpreted through the exact same
+    AWAITING_CLARIFICATION / reply_to_clarification machinery a
+    clarifying question uses. This field only changes which intents are
+    acceptable during routing (see orchestrator.py) and how the run gets
+    created; it does not add a parallel workflow."""
+
+    CUSTOMER_INITIATED = "CUSTOMER_INITIATED"
+    RECOVERY = "RECOVERY"
+
+
 class EscalationStatus(str, enum.Enum):
     OPEN = "OPEN"
     RESOLVED = "RESOLVED"
@@ -70,6 +83,17 @@ class ProcessingRun(Base):
         sa.Enum(ProcessingRunState, name="processing_run_state"),
         nullable=False,
         default=ProcessingRunState.RECEIVED,
+    )
+    kind: Mapped[ProcessingRunKind] = mapped_column(
+        sa.Enum(ProcessingRunKind, name="processing_run_kind"),
+        nullable=False,
+        default=ProcessingRunKind.CUSTOMER_INITIATED,
+    )
+    # Set only for kind=RECOVERY -- the NO_SHOW appointment this run is
+    # trying to recover. A successful rebooking links the new Appointment
+    # back to this one via Appointment.rebooked_from_id.
+    recovery_of_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), nullable=True
     )
     matched_service_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("services.id", ondelete="RESTRICT"), nullable=True
@@ -234,4 +258,53 @@ class Notification(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
+
+
+class ScheduledJobType(str, enum.Enum):
+    SEND_REMINDER = "SEND_REMINDER"
+
+
+class ScheduledJobStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    LOCKED = "LOCKED"
+    DONE = "DONE"
+    FAILED_RETRYABLE = "FAILED_RETRYABLE"
+
+
+class ScheduledJob(Base):
+    """One-off, entity-specific deferred actions -- currently just
+    SEND_REMINDER. Recurring maintenance (no-show detection, expiring
+    abandoned runs) is NOT modeled here: those are periodic sweeps over
+    the whole table, not per-entity scheduled work, so they're plain
+    functions the worker calls on a timer instead (app/workflow/jobs.py).
+
+    The worker claims due jobs with SELECT ... FOR UPDATE SKIP LOCKED, so
+    more than one worker process can run safely without double-executing
+    a job -- the same pattern the original architecture proposal
+    specified for this table (Section I), not a new design.
+    """
+
+    __tablename__ = "scheduled_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    job_type: Mapped[ScheduledJobType] = mapped_column(
+        sa.Enum(ScheduledJobType, name="scheduled_job_type"), nullable=False
+    )
+    run_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[ScheduledJobStatus] = mapped_column(
+        sa.Enum(ScheduledJobStatus, name="scheduled_job_status"),
+        nullable=False,
+        default=ScheduledJobStatus.PENDING,
+    )
+    attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now()
     )

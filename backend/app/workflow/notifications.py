@@ -1,6 +1,6 @@
 """The notification boundary: workflow code depends on NotificationService,
 never on a specific email/SMS vendor. MockProvider is the only
-implementation until Phase 7 introduces a real one (e.g. Resend) -- that
+implementation until Phase 8 introduces a real one (e.g. Resend) -- that
 phase adds a new module here, not new call sites.
 """
 
@@ -24,6 +24,30 @@ class NotificationService(Protocol):
         run: ProcessingRun,
     ) -> Notification: ...
 
+    async def send_reminder(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+    ) -> Notification:
+        """No `run` parameter -- a reminder fires long after its
+        ProcessingRun reached SUCCEEDED, from a background sweep with no
+        request context at all."""
+        ...
+
+    async def send_no_show_recovery(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+        run: ProcessingRun,
+    ) -> Notification:
+        """The recovery outreach message -- `run` is the new kind=RECOVERY
+        ProcessingRun this outreach opens, not the original booking's."""
+        ...
+
 
 class MockNotificationProvider:
     """Persists a Notification row without contacting any real provider --
@@ -44,8 +68,50 @@ class MockNotificationProvider:
             channel="mock",
             to_contact=customer.contact,
             subject="Appointment confirmed",
+            body=(f"Your appointment is confirmed for {appointment.start_at.isoformat()} (UTC)."),
+            status=NotificationStatus.SENT,
+        )
+        db.add(notification)
+        await db.flush()
+        return notification
+
+    async def send_reminder(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+    ) -> Notification:
+        notification = Notification(
+            processing_run_id=None,
+            appointment_id=appointment.id,
+            channel="mock",
+            to_contact=customer.contact,
+            subject="Appointment reminder",
+            body=(f"Reminder: your appointment is at {appointment.start_at.isoformat()} (UTC)."),
+            status=NotificationStatus.SENT,
+        )
+        db.add(notification)
+        await db.flush()
+        return notification
+
+    async def send_no_show_recovery(
+        self,
+        db: AsyncSession,
+        *,
+        appointment: Appointment,
+        customer: Customer,
+        run: ProcessingRun,
+    ) -> Notification:
+        notification = Notification(
+            processing_run_id=run.id,
+            appointment_id=appointment.id,
+            channel="mock",
+            to_contact=customer.contact,
+            subject="We missed you",
             body=(
-                f"Your appointment is confirmed for " f"{appointment.start_at.isoformat()} (UTC)."
+                f"Sorry we missed you for your {appointment.start_at.isoformat()} (UTC) "
+                "appointment -- would you like to reschedule?"
             ),
             status=NotificationStatus.SENT,
         )

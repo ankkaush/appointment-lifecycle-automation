@@ -56,6 +56,14 @@ class Business(Base):
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)
     min_booking_notice_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=60)
     max_booking_horizon_days: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=60)
+    # How long past an appointment's end time it may sit BOOKED before the
+    # no-show sweep resolves it -- the deterministic rule from the
+    # architecture review's Concern 3: now > end_at + grace -> NO_SHOW.
+    no_show_grace_period_minutes: Mapped[int] = mapped_column(
+        sa.Integer, nullable=False, default=15
+    )
+    # How long before an appointment's start time the reminder job fires.
+    reminder_lead_hours: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=24)
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=func.now()
     )
@@ -230,6 +238,14 @@ class Appointment(Base):
         sa.Enum(CalendarSyncStatus, name="calendar_sync_status"),
         nullable=False,
         default=CalendarSyncStatus.PENDING,
+    )
+    # Set when this appointment was created by a successful no-show
+    # recovery -- points at the original (which stays immutably NO_SHOW;
+    # recovery never rewrites history, it creates a new row and links
+    # back to it). Self-referential, deferred since Phase 1 for exactly
+    # this moment.
+    rebooked_from_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="SET NULL"), nullable=True
     )
 
     created_at: Mapped[datetime] = mapped_column(

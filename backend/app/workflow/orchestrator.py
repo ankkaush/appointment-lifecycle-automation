@@ -25,6 +25,7 @@ from app.domain.customers import find_or_create_customer
 from app.domain.exceptions import DomainError, EntityNotFoundError, SlotUnavailableError
 from app.domain.models import (
     Appointment,
+    AppointmentStatus,
     Business,
     CalendarSyncStatus,
     Customer,
@@ -45,7 +46,10 @@ from app.workflow.models import (
     AuditEvent,
     EscalationCase,
     ProcessingRun,
+    ProcessingRunKind,
     ProcessingRunState,
+    ScheduledJob,
+    ScheduledJobType,
     WorkflowStep,
 )
 from app.workflow.notifications import NotificationService
@@ -288,19 +292,31 @@ async def _interpret_and_route(
         db, run, "interpreted", {"intent": req.intent.value, "confidence": req.confidence}
     )
 
-    # Ambiguity that still plausibly means BOOK -- either the model
-    # committed to intent=book with missing detail, or it flagged BOOK as
-    # one of a small set of candidate intents (architecture review,
-    # Finding 1) -- gets a bounded clarifying question. Anything else
-    # ambiguous (confident non-BOOK, or no coherent candidates at all)
-    # falls through to the same honest escalation as a confident non-BOOK
-    # intent: Phase 3 automates the booking path only, and clarification
-    # stays scoped to it.
-    book_is_candidate = req.intent == Intent.BOOK or (
-        req.candidate_intents is not None and Intent.BOOK in req.candidate_intents
+    # Ambiguity that still plausibly means an intent this run can act on
+    # gets a bounded clarifying question. Anything else ambiguous (a
+    # confident unacceptable intent, or no coherent candidates at all)
+    # falls through to the same honest escalation as a confident
+    # unacceptable intent.
+    #
+    # For an ordinary customer-initiated run, only BOOK is acceptable --
+    # Phase 7 gives cancel/reschedule their own deterministic policy
+    # handling. For a no-show RECOVERY run, RESCHEDULE is accepted too:
+    # a customer replying "can I come Thursday instead?" to a recovery
+    # message is describing the exact same action as booking a new
+    # appointment for the missed one, whichever word the model reaches
+    # for -- narrowly widening what's acceptable for this one run kind,
+    # not changing what Phase 7 will later mean by "reschedule" for an
+    # existing, still-BOOKED appointment.
+    acceptable_intents = (
+        {Intent.BOOK, Intent.RESCHEDULE}
+        if run.kind == ProcessingRunKind.RECOVERY
+        else {Intent.BOOK}
+    )
+    intent_is_acceptable = req.intent in acceptable_intents or bool(
+        req.candidate_intents and acceptable_intents & set(req.candidate_intents)
     )
 
-    if req.is_ambiguous and book_is_candidate:
+    if req.is_ambiguous and intent_is_acceptable:
         if run.clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
             await _escalate(
                 db,
@@ -326,7 +342,7 @@ async def _interpret_and_route(
         )
         return
 
-    if req.intent != Intent.BOOK:
+    if req.intent not in acceptable_intents:
         await _escalate(
             db,
             run,
@@ -334,21 +350,31 @@ async def _interpret_and_route(
         )
         return
 
-    matched_service_name = match_known_service(req.service_hint, known_services)
-    if matched_service_name is None:
-        await _escalate(
-            db, run, f"could not match service hint {req.service_hint!r} to a configured service"
-        )
-        return
-
-    service = (
-        await db.execute(
-            select(Service).where(
-                Service.business_id == business.id, Service.name == matched_service_name
+    if run.matched_service_id is not None:
+        # A recovery run already knows the service -- it's the one from
+        # the appointment being recovered (set in start_recovery). No
+        # need to re-match a hint the customer's reply may not even
+        # repeat ("Thursday instead" doesn't name the service again).
+        service = await db.get(Service, run.matched_service_id)
+    else:
+        matched_service_name = match_known_service(req.service_hint, known_services)
+        if matched_service_name is None:
+            await _escalate(
+                db,
+                run,
+                f"could not match service hint {req.service_hint!r} to a configured service",
             )
-        )
-    ).scalar_one()
-    run.matched_service_id = service.id
+            return
+
+        service = (
+            await db.execute(
+                select(Service).where(
+                    Service.business_id == business.id, Service.name == matched_service_name
+                )
+            )
+        ).scalar_one()
+        run.matched_service_id = service.id
+
     run.resolved_date = req.resolved_date
 
     await _offer_slots_or_escalate(db, run, business, service, now, resolved_date=req.resolved_date)
@@ -486,6 +512,10 @@ async def confirm_slot(
         return run
 
     run.resulting_appointment_id = appointment.id
+    if run.kind == ProcessingRunKind.RECOVERY:
+        # Link forward, never rewrite: the original stays immutably
+        # NO_SHOW; this new row is what actually got booked.
+        appointment.rebooked_from_id = run.recovery_of_appointment_id
     db.add(
         AuditEvent(
             processing_run_id=run.id,
@@ -522,8 +552,30 @@ async def confirm_slot(
     )
     await _log_step(db, run, "confirmation_sent")
 
+    await _schedule_reminder(db, appointment, business)
+    await _log_step(db, run, "reminder_scheduled")
+
     await db.commit()
     return run
+
+
+async def _schedule_reminder(
+    db: AsyncSession, appointment: Appointment, business: Business
+) -> None:
+    """One-off, entity-specific deferred work -- goes through
+    ScheduledJob, not a periodic sweep (see app.workflow.jobs). The
+    reminder job re-checks the appointment is still BOOKED before
+    sending, so this is safe to schedule even though the appointment
+    could be cancelled long before run_at arrives."""
+    run_at = appointment.start_at - timedelta(hours=business.reminder_lead_hours)
+    db.add(
+        ScheduledJob(
+            job_type=ScheduledJobType.SEND_REMINDER,
+            run_at=run_at,
+            payload={"appointment_id": str(appointment.id)},
+        )
+    )
+    await db.flush()
 
 
 async def _sync_calendar(
@@ -618,3 +670,58 @@ async def retry_calendar_sync(
     await db.commit()
     await db.refresh(appointment)
     return appointment
+
+
+async def start_recovery(
+    db: AsyncSession,
+    appointment_id: UUID,
+    *,
+    notification_service: NotificationService,
+    now: datetime | None = None,
+) -> ProcessingRun:
+    """Opens a no-show recovery attempt: sends the outreach message and
+    creates a kind=RECOVERY ProcessingRun sitting in
+    AWAITING_CLARIFICATION, ready for the customer's reply through the
+    exact same reply_to_clarification / POST /reply path a clarifying
+    question uses -- no parallel endpoint, no parallel state. Called by
+    the no-show sweep (app.workflow.jobs) immediately after an
+    appointment is marked NO_SHOW.
+    """
+    now = now or datetime.now(UTC)
+
+    appointment = await db.get(Appointment, appointment_id)
+    if appointment is None:
+        raise EntityNotFoundError("Appointment", appointment_id)
+    if appointment.status != AppointmentStatus.NO_SHOW:
+        raise DomainError(
+            f"Appointment {appointment_id} is {appointment.status.value}, not NO_SHOW"
+        )
+
+    customer = await db.get(Customer, appointment.customer_id)
+
+    run = ProcessingRun(
+        business_id=appointment.business_id,
+        customer_id=appointment.customer_id,
+        raw_message="(system-initiated no-show recovery outreach)",
+        state=ProcessingRunState.RECEIVED,
+        kind=ProcessingRunKind.RECOVERY,
+        recovery_of_appointment_id=appointment.id,
+        # Already known from the missed appointment -- a reply like
+        # "Thursday instead?" won't repeat the service name, so there is
+        # nothing to re-match against known_services later.
+        matched_service_id=appointment.service_id,
+        messages=[],
+    )
+    db.add(run)
+    await db.flush()
+    await _log_step(db, run, "no_show_recovery_opened", {"appointment_id": str(appointment.id)})
+
+    notification = await notification_service.send_no_show_recovery(
+        db, appointment=appointment, customer=customer, run=run
+    )
+    _append_message(run, "assistant", notification.body, now)
+    await _log_step(db, run, "recovery_outreach_sent")
+
+    await _transition(db, run, ProcessingRunState.AWAITING_CLARIFICATION)
+    await db.commit()
+    return run

@@ -62,6 +62,7 @@ async def test_full_lifecycle_via_http(
             "booking_succeeded",
             "calendar_sync_succeeded",
             "confirmation_sent",
+            "reminder_scheduled",
         ]
 
 

@@ -35,5 +35,23 @@ services:
       - ./backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
+  # Background jobs (Phase 6): same image, same Postgres, a different
+  # command -- not a new infrastructure component. Coordinates with any
+  # other worker instance purely through SKIP LOCKED on scheduled_jobs.
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://appointment:changeme@db:5432/appointment_automation
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: python -m app.worker
+
 volumes:
   db_data:

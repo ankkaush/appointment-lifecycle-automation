@@ -175,11 +175,12 @@ async def test_confirm_slot_success_books_and_notifies(
     assert notification.to_contact == customer.contact
 
     steps = await _steps(db, run.id)
-    assert steps[-4:] == [
+    assert steps[-5:] == [
         "booking_attempted",
         "booking_succeeded",
         "calendar_sync_succeeded",
         "confirmation_sent",
+        "reminder_scheduled",
     ]
 
 
