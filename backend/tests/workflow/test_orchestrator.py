@@ -19,6 +19,7 @@ from app.domain.models import (
 )
 from app.domain.schemas import BookingRequest
 from app.workflow import orchestrator
+from app.workflow.calendar import MockCalendarProvider
 from app.workflow.exceptions import InvalidSlotChoiceError
 from app.workflow.models import (
     AIInvocation,
@@ -158,7 +159,11 @@ async def test_confirm_slot_success_books_and_notifies(
         start_at=datetime.fromisoformat(chosen["start_at"]), idempotency_key=str(uuid4())
     )
     result = await orchestrator.confirm_slot(
-        db, run.id, confirm_payload, notification_service=MockNotificationProvider()
+        db,
+        run.id,
+        confirm_payload,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
     )
 
     assert result.state == ProcessingRunState.SUCCEEDED
@@ -170,7 +175,12 @@ async def test_confirm_slot_success_books_and_notifies(
     assert notification.to_contact == customer.contact
 
     steps = await _steps(db, run.id)
-    assert steps[-3:] == ["booking_attempted", "booking_succeeded", "confirmation_sent"]
+    assert steps[-4:] == [
+        "booking_attempted",
+        "booking_succeeded",
+        "calendar_sync_succeeded",
+        "confirmation_sent",
+    ]
 
 
 @pytest.mark.asyncio
@@ -187,7 +197,11 @@ async def test_confirm_slot_rejects_choice_not_offered(
 
     with pytest.raises(InvalidSlotChoiceError):
         await orchestrator.confirm_slot(
-            db, run.id, confirm_payload, notification_service=MockNotificationProvider()
+            db,
+            run.id,
+            confirm_payload,
+            notification_service=MockNotificationProvider(),
+            calendar_provider=MockCalendarProvider(),
         )
 
 
@@ -224,7 +238,11 @@ async def test_confirm_slot_reoffers_when_concurrently_taken(
 
     confirm_payload = ConfirmSlotIn(start_at=original_start, idempotency_key=str(uuid4()))
     result = await orchestrator.confirm_slot(
-        db, run.id, confirm_payload, notification_service=MockNotificationProvider()
+        db,
+        run.id,
+        confirm_payload,
+        notification_service=MockNotificationProvider(),
+        calendar_provider=MockCalendarProvider(),
     )
 
     # Re-offered, not failed: still awaiting confirmation, with fresh

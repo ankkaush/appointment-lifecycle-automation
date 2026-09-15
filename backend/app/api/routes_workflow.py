@@ -15,6 +15,9 @@ from app.ai.interpreter import Interpreter
 from app.api.rate_limit import enforce_chat_rate_limit
 from app.core.db import get_db
 from app.domain.exceptions import DomainError
+from app.domain.models import Appointment
+from app.domain.schemas import AppointmentOut
+from app.workflow.calendar import CalendarProvider, MockCalendarProvider
 from app.workflow.exceptions import WorkflowError
 from app.workflow.models import (
     AIInvocation,
@@ -24,7 +27,12 @@ from app.workflow.models import (
     WorkflowStep,
 )
 from app.workflow.notifications import MockNotificationProvider, NotificationService
-from app.workflow.orchestrator import confirm_slot, reply_to_clarification, start_request
+from app.workflow.orchestrator import (
+    confirm_slot,
+    reply_to_clarification,
+    retry_calendar_sync,
+    start_request,
+)
 from app.workflow.schemas import (
     AIInvocationOut,
     ConfirmSlotIn,
@@ -41,6 +49,10 @@ router = APIRouter()
 
 def get_notification_service() -> NotificationService:
     return MockNotificationProvider()
+
+
+def get_calendar_provider() -> CalendarProvider:
+    return MockCalendarProvider()
 
 
 @router.post(
@@ -85,15 +97,32 @@ async def confirm_request(
     payload: ConfirmSlotIn,
     db: AsyncSession = Depends(get_db),
     notification_service: NotificationService = Depends(get_notification_service),
+    calendar_provider: CalendarProvider = Depends(get_calendar_provider),
 ) -> ProcessingRun:
     try:
         return await confirm_slot(
-            db, processing_run_id, payload, notification_service=notification_service
+            db,
+            processing_run_id,
+            payload,
+            notification_service=notification_service,
+            calendar_provider=calendar_provider,
         )
     except WorkflowError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except DomainError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/appointments/{appointment_id}/retry-calendar-sync", response_model=AppointmentOut)
+async def retry_calendar_sync_request(
+    appointment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    calendar_provider: CalendarProvider = Depends(get_calendar_provider),
+) -> Appointment:
+    try:
+        return await retry_calendar_sync(db, appointment_id, calendar_provider=calendar_provider)
+    except DomainError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/requests/{processing_run_id}/trace", response_model=ProcessingRunTraceOut)

@@ -18,8 +18,8 @@ Architecture proposed and reviewed; implementation in progress.
 - [x] Phase 1 — domain core: schema, deterministic availability engine, atomic booking
 - [x] Phase 2 — AI interpretation layer + golden-set evaluation
 - [x] Phase 3 — workflow engine, audit trail, notification interface
-- [x] **Phase 4** — customer web chat (bounded clarification loop + thin chat UI)
-- [ ] Phase 5 — calendar provider abstraction (mock + Google Calendar)
+- [x] Phase 4 — customer web chat (bounded clarification loop + thin chat UI)
+- [x] **Phase 5** — calendar provider abstraction (mock; Google Calendar deferred)
 - [ ] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
 - [ ] Phase 7 — cancellation & rescheduling
 - [ ] Phase 8 — real notification provider
@@ -123,6 +123,29 @@ directly as the clarifying question shown to the customer, reads like an
 internal diagnostic note rather than natural chat copy. Both are prompt/
 copy tuning opportunities for a follow-up, not defects in this phase's
 mechanism, which is verified working correctly end to end.
+
+Phase 5 detail: `app/workflow/calendar.py` adds the `CalendarProvider`
+Protocol (`create_event` / `update_event` / `cancel_event` — three
+methods, matching the architecture baseline's Section H spec exactly)
+and `MockCalendarProvider`, the only implementation for now — a real
+Google Calendar adapter is deliberately deferred pending a separate
+decision on credential configuration; nothing Google-specific exists
+anywhere in this codebase yet. `Appointment` gains `calendar_event_id`
+and `calendar_sync_status` (`PENDING`/`SYNCED`/`FAILED`, tracked
+independently of `AppointmentStatus` so a sync failure can never be
+confused with, or block, the booking itself). Sync is attempted
+synchronously right after a booking commits in `confirm_slot`, but a
+`CalendarProviderError` never invalidates the booking and never skips
+the customer's confirmation notification, which still fires regardless.
+Sync events reuse the existing `AuditEvent` table rather than a new one.
+`retry_calendar_sync` (plus `POST /v1/appointments/{id}/retry-calendar-
+sync`) is a manual, idempotent retry — not an automated sweep, which
+belongs with Phase 6's background-job infrastructure once it exists;
+retrying an already-`SYNCED` appointment is a harmless no-op that never
+even calls the provider. `app/domain/availability.py` and
+`app/domain/booking.py` are untouched — the calendar has no path back
+into availability or conflict-prevention logic. No live Anthropic calls
+in this phase's implementation.
 
 ## Stack
 

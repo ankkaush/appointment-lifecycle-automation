@@ -60,6 +60,7 @@ async def test_full_lifecycle_via_http(
             "awaiting_confirmation",
             "booking_attempted",
             "booking_succeeded",
+            "calendar_sync_succeeded",
             "confirmation_sent",
         ]
 

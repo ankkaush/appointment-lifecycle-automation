@@ -82,6 +82,8 @@ class AppointmentOut(BaseModel):
     end_at: datetime
     status: str
     idempotency_key: str
+    calendar_event_id: str | None
+    calendar_sync_status: str
 
 
 class SlotOut(BaseModel):

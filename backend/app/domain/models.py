@@ -31,6 +31,17 @@ class AppointmentStatus(str, enum.Enum):
     NO_SHOW = "NO_SHOW"
 
 
+class CalendarSyncStatus(str, enum.Enum):
+    """The calendar is an asynchronous mirror of the booking, never the
+    source of truth -- this status is tracked independently of
+    AppointmentStatus so a sync failure can never be confused with, or
+    block, the booking itself (architecture baseline, Section H)."""
+
+    PENDING = "PENDING"
+    SYNCED = "SYNCED"
+    FAILED = "FAILED"
+
+
 def _uuid() -> uuid.UUID:
     return uuid.uuid4()
 
@@ -210,6 +221,16 @@ class Appointment(Base):
     # Client-supplied key: a retried confirm, or a network retry, resolves
     # to the same appointment instead of creating a duplicate.
     idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    # Calendar mirror state -- set after booking commits, never before,
+    # and a FAILED sync never reverts status away from BOOKED. See
+    # app/workflow/calendar.py.
+    calendar_event_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    calendar_sync_status: Mapped[CalendarSyncStatus] = mapped_column(
+        sa.Enum(CalendarSyncStatus, name="calendar_sync_status"),
+        nullable=False,
+        default=CalendarSyncStatus.PENDING,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=func.now()

@@ -22,9 +22,18 @@ from app.ai.resolve import match_known_service
 from app.ai.schemas import Intent
 from app.domain import availability, booking
 from app.domain.customers import find_or_create_customer
-from app.domain.exceptions import DomainError, SlotUnavailableError
-from app.domain.models import Business, Customer, Service, StaffResource, staff_services
+from app.domain.exceptions import DomainError, EntityNotFoundError, SlotUnavailableError
+from app.domain.models import (
+    Appointment,
+    Business,
+    CalendarSyncStatus,
+    Customer,
+    Service,
+    StaffResource,
+    staff_services,
+)
 from app.domain.schemas import BookingRequest
+from app.workflow.calendar import CalendarProvider, CalendarProviderError
 from app.workflow.clarify import derive_clarifying_question
 from app.workflow.exceptions import (
     InvalidSlotChoiceError,
@@ -421,6 +430,7 @@ async def confirm_slot(
     payload: ConfirmSlotIn,
     *,
     notification_service: NotificationService,
+    calendar_provider: CalendarProvider,
     now: datetime | None = None,
 ) -> ProcessingRun:
     now = now or datetime.now(UTC)
@@ -489,7 +499,24 @@ async def confirm_slot(
     await _transition(db, run, ProcessingRunState.SUCCEEDED)
     await _log_step(db, run, "booking_succeeded", {"appointment_id": str(appointment.id)})
 
+    staff = await db.get(StaffResource, appointment.staff_id)
     customer = await db.get(Customer, run.customer_id)
+
+    # Best-effort, never blocking: a calendar sync failure must not
+    # invalidate a booking that already committed, and must not delay or
+    # skip the customer's confirmation below (architecture baseline,
+    # Section H/K).
+    await _sync_calendar(
+        db,
+        appointment,
+        business=business,
+        service=service,
+        staff=staff,
+        customer=customer,
+        calendar_provider=calendar_provider,
+        run=run,
+    )
+
     await notification_service.send_confirmation(
         db, appointment=appointment, customer=customer, run=run
     )
@@ -497,3 +524,97 @@ async def confirm_slot(
 
     await db.commit()
     return run
+
+
+async def _sync_calendar(
+    db: AsyncSession,
+    appointment: Appointment,
+    *,
+    business: Business,
+    service: Service,
+    staff: StaffResource,
+    customer: Customer,
+    calendar_provider: CalendarProvider,
+    run: ProcessingRun | None = None,
+) -> None:
+    """Attempts to mirror a BOOKED appointment onto the external calendar.
+    Success or failure, the appointment's own status is never touched
+    here -- only calendar_event_id / calendar_sync_status. `run` is
+    optional so this same function serves both the confirm-time sync
+    (inside a ProcessingRun) and the standalone manual retry endpoint
+    (no ProcessingRun context)."""
+    try:
+        event_id = await calendar_provider.create_event(
+            appointment=appointment,
+            business=business,
+            service=service,
+            staff=staff,
+            customer=customer,
+        )
+    except CalendarProviderError as exc:
+        appointment.calendar_sync_status = CalendarSyncStatus.FAILED
+        db.add(
+            AuditEvent(
+                processing_run_id=run.id if run else None,
+                entity_type="Appointment",
+                entity_id=appointment.id,
+                from_state=CalendarSyncStatus.PENDING.value,
+                to_state="calendar_sync:FAILED",
+                reason=str(exc),
+            )
+        )
+        if run is not None:
+            await _log_step(db, run, "calendar_sync_failed", {"error": str(exc)})
+        await db.flush()
+        return
+
+    appointment.calendar_event_id = event_id
+    appointment.calendar_sync_status = CalendarSyncStatus.SYNCED
+    db.add(
+        AuditEvent(
+            processing_run_id=run.id if run else None,
+            entity_type="Appointment",
+            entity_id=appointment.id,
+            from_state=CalendarSyncStatus.PENDING.value,
+            to_state="calendar_sync:SYNCED",
+            reason=None,
+        )
+    )
+    if run is not None:
+        await _log_step(db, run, "calendar_sync_succeeded", {"calendar_event_id": event_id})
+    await db.flush()
+
+
+async def retry_calendar_sync(
+    db: AsyncSession, appointment_id: UUID, *, calendar_provider: CalendarProvider
+) -> Appointment:
+    """Manual, idempotent retry -- not the automated sweep (that's a
+    later phase's background-job infrastructure). Safe to call on any
+    appointment at any time: already-SYNCED is a harmless no-op, and a
+    repeated failure just records another attempt without corrupting
+    anything."""
+    appointment = await db.get(Appointment, appointment_id)
+    if appointment is None:
+        raise EntityNotFoundError("Appointment", appointment_id)
+
+    if appointment.calendar_sync_status == CalendarSyncStatus.SYNCED:
+        return appointment
+
+    business = await db.get(Business, appointment.business_id)
+    service = await db.get(Service, appointment.service_id)
+    staff = await db.get(StaffResource, appointment.staff_id)
+    customer = await db.get(Customer, appointment.customer_id)
+
+    await _sync_calendar(
+        db,
+        appointment,
+        business=business,
+        service=service,
+        staff=staff,
+        customer=customer,
+        calendar_provider=calendar_provider,
+        run=None,
+    )
+    await db.commit()
+    await db.refresh(appointment)
+    return appointment
