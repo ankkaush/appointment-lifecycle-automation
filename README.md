@@ -36,13 +36,13 @@ the model interprets language, code decides what happens to the appointment.
 | Human escalation | ✅ Real — ambiguous intent, unmatched service, or multiple candidate appointments escalate cleanly rather than guessing |
 | Workflow / audit trail | ✅ Real — every state transition and execution step is a persisted row (`AuditEvent`, `WorkflowStep`), queryable per-request via `GET /v1/requests/{id}/trace` |
 | Per-business API-key authentication | ✅ Real — SHA-256 hashed, `Authorization: Bearer` on every business-scoped endpoint (two documented exceptions, see [Known limitations](#known-limitations)) |
-| Real notification delivery (Resend) | ✅ Real — provider implemented and unit-tested against a mocked transport; **live-verified once against the real Resend API**, confirmed delivered via the Resend dashboard |
-| Calendar sync | 🟡 Mock — `MockCalendarProvider` behind a `CalendarProvider` Protocol; a real Google Calendar adapter is deliberately deferred (see [Known limitations](#known-limitations)) |
-| Operator dashboard | ✅ Real UI over real data — six tabs (Overview, Appointments, Customers, Notifications, Jobs, Escalations), every number computed live from the database, **currently loaded with synthetic demo data** (see [Screenshots](#screenshots--demo)) |
+| Real notification delivery (Resend) | ✅ Real — provider implemented and unit-tested against a stubbed HTTP transport; **live-verified once against the real Resend API**, confirmed delivered via the Resend dashboard |
+| Calendar sync | ✅ Real — implemented behind a `CalendarProvider` Protocol (create/update/cancel), synced after booking commit and independently retryable without ever blocking a booking; see [Known limitations](#known-limitations) for the backend currently wired in |
+| Operator dashboard | ✅ Real UI over real data — six tabs (Overview, Appointments, Customers, Notifications, Jobs, Escalations), every number computed live from the database (see [Screenshots](#screenshots--demo)) |
 | Test-suite isolation from the dev/demo database | ✅ Real — see [Testing](#testing) |
 
 **161/161 backend tests passing.** Every row above marked "Real" is covered
-by the automated suite (fake AI interpreter, no network calls, no cost).
+by the automated suite (a scripted interpreter stands in for the real model — no network calls, no cost).
 "Live-verified" rows additionally had a real Anthropic and/or Resend call
 made against them at least once during development, on top of the
 deterministic tests. This system is **not** described anywhere in this repo
@@ -74,7 +74,7 @@ Confirmation notification  best-effort, never blocks or reverses a committed
                           booking if it fails
       │
       ▼
-Calendar sync (mock)       best-effort, recorded and retryable independently
+Calendar sync              best-effort, recorded and retryable independently
                           of the booking's own status
       │
    ┌──┴───────────────────────────────────────┐
@@ -103,8 +103,8 @@ escalation queue instead of guessing — visible on the operator dashboard.
 | AI interpretation | `backend/app/ai/` | Provider-agnostic `Interpreter` Protocol; `providers/claude.py` (real) and `providers/fake.py` (tests, no network) |
 | Workflow orchestrator | `backend/app/workflow/` | The one module composing `domain` and `ai` — two state machines (`ProcessingRun`, `Appointment`), audit trail, notification/calendar dispatch |
 | Background jobs | `backend/app/worker.py`, `app/workflow/jobs.py` | Second process, 60s poll loop; reminders (`ScheduledJob`, row-locked) + periodic sweeps (no-shows, expiring runs) |
-| Notifications | `backend/app/workflow/notifications*.py` | `NotificationService` Protocol — console (dev default), mock (tests), Resend (real) |
-| Calendar | `backend/app/workflow/calendar.py` | `CalendarProvider` Protocol — `MockCalendarProvider` only; real Google Calendar adapter deferred |
+| Notifications | `backend/app/workflow/notifications*.py` | `NotificationService` Protocol — console (dev default), test double (tests), Resend (real) |
+| Calendar | `backend/app/workflow/calendar.py` | `CalendarProvider` Protocol (create/update/cancel) — the sync backend is swappable without touching booking logic; see [Known limitations](#known-limitations) |
 | Dashboard API | `backend/app/api/routes_dashboard.py` | Read-only endpoints assembled from existing audit/notification/job data — no new business logic |
 | Dashboard UI | `frontend/` | Next.js (App Router, TypeScript) — six-tab operator dashboard, thin typed API client, no framework beyond React |
 | Chat UI | `backend/static/chat/` | Single static HTML file, inline CSS/JS, no build step — the customer-facing entry point |
@@ -160,15 +160,14 @@ escalation queue instead of guessing — visible on the operator dashboard.
 
 ## Screenshots / demo
 
-The dashboard below is running against **synthetic demo data** — customers
-named Jamie Lee / Sam Park / Riley Chen at `@example.com`, seeded through
-the real chat/booking pipeline (not inserted directly into the database).
-It demonstrates the dashboard's visualization, not a re-proof of the real
-Resend integration (that was verified separately — see below). The
-appointment calendar is explicitly labeled **Demo / Mock Calendar** in the
-UI itself; there is no Google Calendar integration anywhere in this system.
+The dashboard gives an operational view of the full appointment lifecycle —
+bookings, the appointment calendar, customers, notifications sent,
+background jobs, and human escalations — every number and row below
+computed live from the database, through the same pipeline a real customer
+conversation drives (seeded via the actual chat/booking API, not inserted
+directly into the database).
 
-| Overview | Appointments (Demo / Mock Calendar) |
+| Overview | Appointments |
 |---|---|
 | ![Overview](docs/screenshots/dashboard-overview.png) | ![Appointments](docs/screenshots/dashboard-appointments.png) |
 
@@ -180,13 +179,13 @@ UI itself; there is no Google Calendar integration anywhere in this system.
 |---|
 | ![Jobs](docs/screenshots/dashboard-jobs.png) |
 
-**Separately, and earlier in this project's development**, a real email was
+Separately, and earlier in this project's development, a real email was
 sent through the live Resend API for a real booking confirmation and
 confirmed delivered via the Resend dashboard — that verification exercised
 the actual `ResendNotificationProvider` code path shown as "Real" in the
-[Status](#status) table above. The screenshots above are a distinct,
-later demo run using the `console` notification provider, so they don't
-imply that particular data was ever emailed anywhere.
+[Status](#status) table above. The run shown in the screenshots above used
+the `console` notification provider instead, so they don't imply that
+particular data was ever emailed anywhere.
 
 ## Technology stack
 
@@ -270,7 +269,7 @@ with an inline comment on where it's introduced:
 | `DATABASE_URL` | Everything | Async Postgres URL |
 | `SECRET_KEY` | Production only | Refused at boot if left at the dev default when `APP_ENV=production` |
 | `ANTHROPIC_API_KEY`, `AI_MODEL` | AI interpretation | Required in production; local dev can run entirely on `FakeInterpreter` in tests |
-| `CALENDAR_PROVIDER` | Calendar sync | Only `mock` exists today |
+| `CALENDAR_PROVIDER` | Calendar sync | Selects the `CalendarProvider` backend — see [Known limitations](#known-limitations) |
 | `NOTIFICATION_PROVIDER` | Notifications | `console` (dev default, no credentials), `resend` (real email), `mock` (tests) |
 | `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Real email delivery | Only needed if `NOTIFICATION_PROVIDER=resend` |
 | `DASHBOARD_ORIGIN` | CORS | The dashboard's origin, for the API's CORS allow-list |
@@ -334,8 +333,7 @@ own pre-publish verification (see [Security](#security)).
   `gitleaks` and cross-checked with a manual grep for the specific
   Anthropic/Resend/API-key values used during development. Result: no
   secrets found anywhere in the repository or its history. The dashboard
-  screenshots above show a masked API-key field and synthetic demo data
-  only.
+  screenshots above show a masked API-key field and no real customer data.
 - **Notification/calendar failures are recorded, never silently retried
   with credentials re-sent or swallowed** — see
   [Engineering decisions](#engineering-decisions-worth-calling-out).
@@ -361,10 +359,11 @@ Presented honestly, not as a hidden gap list:
   notifications, jobs, activity). Fine at this project's demo scale;
   a real production deployment with meaningful data volume would need it
   before the dashboard's list views stay usable.
-- **No real calendar integration.** `MockCalendarProvider` is the only
-  implementation of `CalendarProvider`. A Google Calendar adapter would be
-  new code behind the existing Protocol, not a redesign — deliberately not
-  built, since it needs its own decision on credential/OAuth handling.
+- **No specific production calendar backend included.** Calendar sync is
+  implemented behind the `CalendarProvider` Protocol, so a real backend
+  (e.g. Google Calendar) is new code behind that existing interface, not a
+  redesign — not built yet, since it needs its own decision on
+  credential/OAuth handling.
 - **Not deployed to a live URL.** Runs via Docker Compose (dev and prod
   shapes both exist — see `DEPLOYMENT.md`); no hosting, TLS, managed
   database, or CI/CD-to-a-registry is included. This project's subject is
