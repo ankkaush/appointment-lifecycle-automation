@@ -9,6 +9,9 @@
   --open-fg: #b3261e;
   --resolved-bg: #e8f3ea;
   --resolved-fg: #1e6b34;
+  --accent: #2b6cb0;
+  --accent-bg: #e8f0fb;
+  --accent-fg: #2b5fa3;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,6 +26,9 @@
     --open-fg: #ff8a80;
     --resolved-bg: #1c3324;
     --resolved-fg: #7fd99b;
+    --accent: #6ea8e0;
+    --accent-bg: #1b2a3d;
+    --accent-fg: #8fbdf0;
   }
 }
 

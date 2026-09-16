@@ -1,0 +1,363 @@
+/* Shared across every dashboard tab -- cards, tables, badges, timeline,
+   calendar. Kept in one file since these elements repeat across tabs
+   rather than each tab inventing its own variant. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.sectionTitle {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.sectionSubtitle {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: -0.5rem;
+}
+
+/* --- Overview summary cards --- */
+
+.cardGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.75rem;
+}
+
+.statCard {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.statValue {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.statLabel {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.statCardWarn .statValue {
+  color: var(--open-fg);
+}
+
+/* --- Generic table --- */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.table th {
+  text-align: left;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.table td {
+  padding: 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.table tbody tr:hover {
+  background: var(--surface);
+}
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.tableWrap .table {
+  border: none;
+  border-radius: 0;
+}
+
+.clickableRow {
+  cursor: pointer;
+}
+
+/* --- Status badges (see StatusBadge.tsx) --- */
+
+.badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.badgeGood {
+  background: var(--resolved-bg);
+  color: var(--resolved-fg);
+}
+
+.badgeBad {
+  background: var(--open-bg);
+  color: var(--open-fg);
+}
+
+.badgeNeutral {
+  background: var(--accent-bg);
+  color: var(--accent-fg);
+}
+
+/* --- Tabs --- */
+
+.tabBar {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.tabButton {
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.6rem 0.9rem;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+.tabButton:hover {
+  color: var(--foreground);
+}
+
+.tabButtonActive {
+  color: var(--accent-fg);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- Calendar (demo / mock) --- */
+
+.calendarLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  width: fit-content;
+}
+
+.calendarNav {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.calendarNavLabel {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.calendarNav button {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.calendarWeek {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(9rem, 1fr));
+  gap: 0.6rem;
+  overflow-x: auto;
+}
+
+.calendarDay {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-height: 6rem;
+}
+
+.calendarDayToday {
+  border-color: var(--accent);
+}
+
+.calendarDayHeader {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.calendarSlot {
+  font-size: 0.78rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 6px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.calendarSlot:hover {
+  border-color: var(--accent);
+}
+
+.calendarSlotTime {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.calendarEmpty {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* --- Timeline --- */
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+}
+
+.timelineEntry {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.55rem 0;
+  border-left: 2px solid var(--border);
+  padding-left: 1rem;
+  margin-left: 0.3rem;
+  position: relative;
+}
+
+.timelineEntry::before {
+  content: "";
+  position: absolute;
+  left: -0.4rem;
+  top: 1rem;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.timelineTime {
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+  min-width: 9.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.timelineBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.timelineLabel {
+  font-size: 0.88rem;
+}
+
+.timelineDetail {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+/* --- Detail panel (slide-over) --- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 20;
+}
+
+.panel {
+  width: min(28rem, 100%);
+  height: 100%;
+  background: var(--background);
+  border-left: 1px solid var(--border);
+  padding: 1.5rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.panelHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 1rem;
+}
+
+.panelMeta {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+}
+
+.badgeRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.quoteBox {
+  font-size: 0.88rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.errorText {
+  color: var(--danger);
+  font-size: 0.88rem;
+}
+
+.panelClose {
+  font: inherit;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--foreground);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}

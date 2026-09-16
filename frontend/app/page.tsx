@@ -1,33 +1,33 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import styles from "./page.module.css";
-import {
-  ApiError,
-  EscalationQueueItem,
-  EscalationStatus,
-  fetchEscalations,
-  resolveEscalation,
-} from "@/lib/api";
+import dashboardStyles from "@/components/dashboard.module.css";
+import OverviewTab from "@/components/OverviewTab";
+import AppointmentsTab from "@/components/AppointmentsTab";
+import CustomersTab from "@/components/CustomersTab";
+import NotificationsTab from "@/components/NotificationsTab";
+import JobsTab from "@/components/JobsTab";
+import EscalationsTab from "@/components/EscalationsTab";
 
 const BUSINESS_ID_STORAGE_KEY = "dashboard.businessId";
 const API_KEY_STORAGE_KEY = "dashboard.apiKey";
 
-function formatTimestamp(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
+type Tab = "overview" | "appointments" | "customers" | "notifications" | "jobs" | "escalations";
+
+const TABS: { key: Tab; label: string }[] = [
+  { key: "overview", label: "Overview" },
+  { key: "appointments", label: "Appointments" },
+  { key: "customers", label: "Customers" },
+  { key: "notifications", label: "Notifications" },
+  { key: "jobs", label: "Jobs" },
+  { key: "escalations", label: "Escalations" },
+];
 
 export default function DashboardPage() {
   const [businessId, setBusinessId] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [statusFilter, setStatusFilter] = useState<EscalationStatus | "ALL">("OPEN");
-  const [escalations, setEscalations] = useState<EscalationQueueItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
 
   useEffect(() => {
     // localStorage isn't available during server rendering, so stored
@@ -35,72 +35,30 @@ export default function DashboardPage() {
     // than as a useState initializer.
     const storedBusinessId = window.localStorage.getItem(BUSINESS_ID_STORAGE_KEY);
     const storedApiKey = window.localStorage.getItem(API_KEY_STORAGE_KEY);
-    // Only the first setState call in an effect body needs the
-    // disable comment -- the rule doesn't re-fire per call.
+    // Only the first setState call in an effect body needs the disable
+    // comment -- the rule doesn't re-fire per call.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing from an external, client-only store, not a derived render value
     if (storedBusinessId) setBusinessId(storedBusinessId);
     if (storedApiKey) setApiKey(storedApiKey);
   }, []);
 
-  const load = useCallback(
-    async (id: string, key: string, filter: EscalationStatus | "ALL") => {
-      if (!id.trim() || !key.trim()) {
-        setEscalations([]);
-        return;
-      }
-      setLoading(true);
-      setError(null);
-      try {
-        const items = await fetchEscalations(
-          id.trim(),
-          key.trim(),
-          filter === "ALL" ? undefined : filter,
-        );
-        setEscalations(items);
-      } catch (err) {
-        setError(err instanceof ApiError ? err.message : "Could not reach the API.");
-        setEscalations([]);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
-
   useEffect(() => {
     if (!businessId.trim() || !apiKey.trim()) return;
     window.localStorage.setItem(BUSINESS_ID_STORAGE_KEY, businessId.trim());
     window.localStorage.setItem(API_KEY_STORAGE_KEY, apiKey.trim());
-    // Syncing with the backend (an external system) whenever these
-    // inputs change -- the standard shape for this, per React's own
-    // guidance, even though `load`'s eventual setState calls happen
-    // asynchronously after the fetch resolves, not synchronously here.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    load(businessId, apiKey, statusFilter);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-fetch on these three, not on `load` identity
-  }, [businessId, apiKey, statusFilter]);
+  }, [businessId, apiKey]);
 
-  async function handleResolve(item: EscalationQueueItem) {
-    setResolvingId(item.id);
-    setError(null);
-    try {
-      await resolveEscalation(item.id, businessId.trim(), apiKey.trim());
-      await load(businessId, apiKey, statusFilter);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not resolve this escalation.");
-    } finally {
-      setResolvingId(null);
-    }
-  }
-
-  const ready = businessId.trim() && apiKey.trim();
+  const ready = Boolean(businessId.trim() && apiKey.trim());
+  const trimmedBusinessId = businessId.trim();
+  const trimmedApiKey = apiKey.trim();
 
   return (
     <main className={styles.page}>
       <div className={styles.header}>
-        <h1 className={styles.title}>Escalation Queue</h1>
+        <h1 className={styles.title}>Business Dashboard</h1>
         <p className={styles.subtitle}>
-          Requests the automated workflow couldn&apos;t resolve on its own.
+          Operator view over the appointment automation system -- the same lifecycle the customer
+          chat drives, visible from the business side.
         </p>
       </div>
 
@@ -125,70 +83,46 @@ export default function DashboardPage() {
             onChange={(e) => setApiKey(e.target.value)}
           />
         </div>
-        <div className={styles.field}>
-          <label htmlFor="status-filter">Status</label>
-          <select
-            id="status-filter"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as EscalationStatus | "ALL")}
-          >
-            <option value="OPEN">Open</option>
-            <option value="RESOLVED">Resolved</option>
-            <option value="ALL">All</option>
-          </select>
-        </div>
-        <button
-          type="button"
-          className={styles.refreshButton}
-          disabled={loading || !ready}
-          onClick={() => load(businessId, apiKey, statusFilter)}
-        >
-          {loading ? "Loading…" : "Refresh"}
-        </button>
       </div>
 
       {!ready && (
-        <p className={styles.status}>Enter a business ID and its API key to load the queue.</p>
+        <p className={styles.status}>Enter a business ID and its API key to load the dashboard.</p>
       )}
-      {error && <p className={styles.error}>{error}</p>}
 
-      {ready && !error && (
-        <div className={styles.list}>
-          {escalations.length === 0 && !loading && (
-            <p className={styles.empty}>No escalations to show.</p>
+      {ready && (
+        <>
+          <div className={dashboardStyles.tabBar}>
+            {TABS.map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                className={`${dashboardStyles.tabButton} ${
+                  activeTab === tab.key ? dashboardStyles.tabButtonActive : ""
+                }`}
+                onClick={() => setActiveTab(tab.key)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === "overview" && (
+            <OverviewTab businessId={trimmedBusinessId} apiKey={trimmedApiKey} />
           )}
-          {escalations.map((item) => (
-            <div key={item.id} className={styles.card}>
-              <div className={styles.cardTop}>
-                <span className={styles.reason}>{item.reason}</span>
-                <span className={styles.timestamp}>{formatTimestamp(item.created_at)}</span>
-              </div>
-              <div className={styles.customer}>
-                {item.customer_name} &middot; {item.customer_contact}
-              </div>
-              <div className={styles.message}>&ldquo;{item.raw_message}&rdquo;</div>
-              <div className={styles.cardBottom}>
-                <span
-                  className={`${styles.badge} ${
-                    item.status === "OPEN" ? styles.badgeOpen : styles.badgeResolved
-                  }`}
-                >
-                  {item.status}
-                </span>
-                {item.status === "OPEN" && (
-                  <button
-                    type="button"
-                    className={styles.resolveButton}
-                    disabled={resolvingId === item.id}
-                    onClick={() => handleResolve(item)}
-                  >
-                    {resolvingId === item.id ? "Resolving…" : "Resolve"}
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
+          {activeTab === "appointments" && (
+            <AppointmentsTab businessId={trimmedBusinessId} apiKey={trimmedApiKey} />
+          )}
+          {activeTab === "customers" && (
+            <CustomersTab businessId={trimmedBusinessId} apiKey={trimmedApiKey} />
+          )}
+          {activeTab === "notifications" && (
+            <NotificationsTab businessId={trimmedBusinessId} apiKey={trimmedApiKey} />
+          )}
+          {activeTab === "jobs" && <JobsTab businessId={trimmedBusinessId} apiKey={trimmedApiKey} />}
+          {activeTab === "escalations" && (
+            <EscalationsTab businessId={trimmedBusinessId} apiKey={trimmedApiKey} />
+          )}
+        </>
       )}
     </main>
   );

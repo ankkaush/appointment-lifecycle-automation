@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from app.api.routes import router as domain_router
 from app.api.routes_ai import router as ai_router
+from app.api.routes_dashboard import router as dashboard_router
 from app.api.routes_jobs import router as jobs_router
 from app.api.routes_workflow import router as workflow_router
 from app.core.config import get_settings
@@ -36,6 +37,7 @@ app.include_router(domain_router, prefix="/v1", tags=["domain"])
 app.include_router(ai_router, prefix="/v1", tags=["ai"])
 app.include_router(workflow_router, prefix="/v1", tags=["workflow"])
 app.include_router(jobs_router, prefix="/v1", tags=["jobs"])
+app.include_router(dashboard_router, prefix="/v1", tags=["dashboard"])
 
 # The thin customer-facing chat channel (Phase 4). Static HTML/CSS/JS --
 # no framework, no build step -- calling the same /v1/requests, /reply,
