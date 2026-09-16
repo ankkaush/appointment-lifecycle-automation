@@ -13,9 +13,17 @@ jobs:
         with:
           fetch-depth: 0
       - name: Scan for secrets
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # A full, explicit scan rather than gitleaks/gitleaks-action's
+        # default push-event diff range: that range is computed as
+        # `<before>^..<head>`, and on the very first push to a new
+        # repository/branch `<before>` is the repo's own root commit --
+        # which has no parent, so `^` is not a valid revision
+        # (gitleaks/gitleaks-action#199). Scanning explicitly avoids
+        # depending on that edge case ever again (e.g. a force-push or a
+        # rebase would hit the same failure mode).
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz gitleaks
+          ./gitleaks detect --source . --redact -v
 
   lint:
     runs-on: ubuntu-latest
@@ -74,6 +82,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run lint
+      # `next typegen` generates the route/layout types (e.g. LayoutProps)
+      # that `next build`/`next dev` normally generate as a side effect --
+      # needed here since `tsc --noEmit` runs standalone, before `build`.
+      - run: npx next typegen
       - run: npx tsc --noEmit
       - run: npm run build
 
