@@ -2,377 +2,236 @@
 
 An AI-assisted appointment lifecycle automation system: request intake →
 AI interpretation → deterministic availability & booking → confirmation →
-reminders → completion / cancellation / no-show → recovery & rebooking.
+reminders → completion / cancellation / no-show → recovery & rebooking →
+human escalation when automation can't safely proceed.
 
-The guiding principle throughout: **AI for interpretation, deterministic
-systems for control.** AI never decides availability, prevents double
-bookings, or authorizes a booking on its own — it turns language into a
-structured, validated request that deterministic code then checks against
-real business rules and real database state.
+**This is a public repository, released under the [MIT License](LICENSE)** —
+free to use, modify, and adapt.
+
+## Why this exists
+
+Most "AI books your appointment" demos let the model decide whether a slot
+is free. That's the wrong place to put that decision: a model has no way to
+guarantee it won't double-book two customers into the same slot, and
+"probably fine" isn't a standard a real scheduling system can run on. This
+project draws that boundary deliberately — **AI for interpretation,
+deterministic systems for control.** The model turns a customer's free-text
+message into a structured, validated request; it never decides availability,
+never prevents (or causes) a double booking, and never authorizes a booking
+on its own. A Postgres exclusion constraint does that, unconditionally, even
+under real concurrent requests. Everything downstream of a booking —
+reminders, no-show detection, recovery, escalation — follows the same rule:
+the model interprets language, code decides what happens to the appointment.
 
 ## Status
 
-Architecture proposed and reviewed; implementation in progress.
+| Capability | Status |
+|---|---|
+| Deterministic availability engine + atomic booking | ✅ Real — Postgres range-exclusion constraint, proven under a real concurrent-request race (`tests/domain/test_concurrency.py`) |
+| AI interpretation layer (intent, service, date/time, ambiguity) | ✅ Real — live-verified against the real Anthropic API; confidence is advisory-only, never a booking gate |
+| Bounded clarification (customer chat) | ✅ Real — max 2 rounds, then escalates; live-verified end to end through the browser chat UI |
+| Cancellation & rescheduling | ✅ Real — shared notice-window policy, re-validated transactionally against live availability |
+| Background jobs — reminders, no-show detection, recovery, rebooking | ✅ Real — a second worker process on a 60s poll loop, coordinated purely through Postgres (`SELECT ... FOR UPDATE SKIP LOCKED`), no queue/broker |
+| No-show recovery & rebooking | ✅ Real — reuses the clarification machinery; the original `NO_SHOW` appointment is preserved immutably, a new appointment is created |
+| Human escalation | ✅ Real — ambiguous intent, unmatched service, or multiple candidate appointments escalate cleanly rather than guessing |
+| Workflow / audit trail | ✅ Real — every state transition and execution step is a persisted row (`AuditEvent`, `WorkflowStep`), queryable per-request via `GET /v1/requests/{id}/trace` |
+| Per-business API-key authentication | ✅ Real — SHA-256 hashed, `Authorization: Bearer` on every business-scoped endpoint (two documented exceptions, see [Known limitations](#known-limitations)) |
+| Real notification delivery (Resend) | ✅ Real — provider implemented and unit-tested against a mocked transport; **live-verified once against the real Resend API**, confirmed delivered via the Resend dashboard |
+| Calendar sync | 🟡 Mock — `MockCalendarProvider` behind a `CalendarProvider` Protocol; a real Google Calendar adapter is deliberately deferred (see [Known limitations](#known-limitations)) |
+| Operator dashboard | ✅ Real UI over real data — six tabs (Overview, Appointments, Customers, Notifications, Jobs, Escalations), every number computed live from the database, **currently loaded with synthetic demo data** (see [Screenshots](#screenshots--demo)) |
+| Test-suite isolation from the dev/demo database | ✅ Real — see [Testing](#testing) |
 
-- [x] Phase 0 — repo, tooling, Docker Compose, CI, security baseline
-- [x] Phase 1 — domain core: schema, deterministic availability engine, atomic booking
-- [x] Phase 2 — AI interpretation layer + golden-set evaluation
-- [x] Phase 3 — workflow engine, audit trail, notification interface
-- [x] Phase 4 — customer web chat (bounded clarification loop + thin chat UI)
-- [x] Phase 5 — calendar provider abstraction (mock; Google Calendar deferred)
-- [x] Phase 6 — background jobs: reminders, no-show detection, recovery, expiring abandoned conversations
-- [x] Phase 7 — cancellation & rescheduling
-- [x] Phase 8 — real notification provider
-- [x] Phase 9 — business dashboard
-- [x] **Phase 10** — security hardening, full evaluation suite, deployment
+**161/161 backend tests passing.** Every row above marked "Real" is covered
+by the automated suite (fake AI interpreter, no network calls, no cost).
+"Live-verified" rows additionally had a real Anthropic and/or Resend call
+made against them at least once during development, on top of the
+deterministic tests. This system is **not** described anywhere in this repo
+as "production-ready" — see [Known limitations](#known-limitations) for what
+that would still require.
 
-Phase 1 detail: `app/domain/` holds the business/service/staff/customer/
-appointment schema, the deterministic availability engine (working hours,
-blocked periods, buffer time, booking-notice/horizon policy), and the
-booking engine. Concurrency safety comes from a Postgres range-exclusion
-constraint on `appointments` plus a client-supplied idempotency key —
-proven under a real concurrent-request race in
-`tests/domain/test_concurrency.py`. `app/api/` is a thin HTTP layer over
-that — no booking or availability logic lives there.
+## How it works
 
-Phase 2 detail: `app/ai/` holds the interpretation layer — a provider-
-agnostic `Interpreter` Protocol, structured schemas, and a deterministic
-`resolve.py` that matches the AI's free-text service mention against a
-business's real configured services (never a guess: unmatched returns
-`None`). `app/ai/providers/claude.py` is the only module allowed to import
-the Anthropic SDK; `app/ai/providers/fake.py` is a no-network stand-in
-used by every test via FastAPI dependency override. Confidence is
-advisory-only by design — never a gate on booking, per the architecture
-baseline's Concern 4. `eval/` holds a golden set (deliberately including
-ambiguous/hard cases, not just easy wins) and `run_eval.py`, a standalone
-script — not part of `pytest` — that measures intent accuracy, ambiguity
-recall, service-hint accuracy, and a false-confidence rate against the
-real Anthropic API. Wired into CI as an opt-in job gated on an
-`ANTHROPIC_API_KEY` secret and an `AI_EVAL_ENABLED` repo variable, so it's
-skipped rather than failing CI for anyone without a key configured.
+```
+Customer message ("I'd like a haircut Thursday afternoon")
+      │
+      ▼
+AI interpretation        structured intent + service + date/time + confidence
+                          (never trusted as a decision — see below)
+      │
+      ▼
+Bounded clarification     ambiguous? ask once, twice, then escalate to a human
+      │
+      ▼
+Deterministic slots       working hours, blocked time, buffers, notice/horizon
+                          policy, checked against real DB state
+      │
+      ▼
+Booking                   Postgres exclusion constraint — a slot cannot be
+                          double-booked, even under a real concurrent race
+      │
+      ▼
+Confirmation notification  best-effort, never blocks or reverses a committed
+                          booking if it fails
+      │
+      ▼
+Calendar sync (mock)       best-effort, recorded and retryable independently
+                          of the booking's own status
+      │
+   ┌──┴───────────────────────────────────────┐
+   ▼                                           ▼
+Reminder (background worker)          Cancellation / reschedule
+   │                                   (customer-initiated, notice-window
+   ▼                                    gated, re-validated transactionally)
+No-show sweep (periodic, deterministic:
+now > end_at + grace period)
+   │
+   ▼
+Recovery — reuses the clarification loop, original NO_SHOW record
+preserved immutably, a new appointment created on success
+```
 
-Verified live once against the real API (kept deliberately minimal): one
-isolated smoke call through `ClaudeInterpreter`, then the golden set run
-once — 95% intent accuracy, 100% ambiguity recall, 1/24 false-confidence.
-`pytest` itself never calls the real API.
+Any point where the model is uncertain, a service can't be matched, or more
+than one appointment could be the one a customer means, routes to a human
+escalation queue instead of guessing — visible on the operator dashboard.
 
-Phase 3 detail: `app/workflow/` is the orchestrator — the one module that
-composes `app/domain` and `app/ai`, which stay independent of each other
-and of it. Two state machines, per the architecture baseline's Concern 1
-correction: `ProcessingRun` (`RECEIVED → INTERPRETING → SLOTS_OFFERED →
-AWAITING_CONFIRMATION → BOOKING → SUCCEEDED/FAILED/ESCALATED/EXPIRED`,
-enforced by a deterministic transition table in `state_machine.py`, not
-just implied) and `Appointment` (unchanged from Phase 1). Every state
-change is written to `AuditEvent` (the business record); every execution
-step — including ones with no state change — to `WorkflowStep` (the
-trace); every AI call's structured output and cost/latency to
-`AIInvocation`. An ambiguous request, an unmatched service, or any
-non-booking intent escalates cleanly to an `EscalationCase` rather than
-guessing. If a confirmed slot is taken by a concurrent request between
-offer and confirm, the workflow re-offers fresh availability instead of
-just failing (`tests/workflow/test_orchestrator.py`, the re-offer race
-test). `NotificationService` (Protocol + `MockNotificationProvider`) is
-the vendor boundary for confirmations — a real provider arrives in Phase
-8 as a new module, not new call sites. `GET /v1/requests/{id}/trace`
-answers "what happened to this request?" directly from these tables — no
-separate tracing stack.
+## Architecture
 
-Phase 4 detail: extends Phase 3's `ProcessingRun` state machine with one
-new state, `AWAITING_CLARIFICATION` (`INTERPRETING` is the hub state,
-reached fresh or via a clarification reply — the post-interpretation
-routing decision always happens from the same place). Bounded, not an
-open-ended chatbot: at most 2 clarification rounds
-(`orchestrator.MAX_CLARIFICATION_ROUNDS`) before escalating rather than
-looping — the same cap the original architecture proposal specified for
-ambiguous requests. The AI's existing `ambiguity_reason` field doubles as
-the clarifying question, so Phase 2's contract needed no changes. A
-bounded transcript (`ProcessingRun.messages`, JSONB — operational data,
-same shorter-retention register as `WorkflowStep`, not a permanent
-record; no purge job yet, landing with Phase 6's sweep) carries context
-across turns without a new conversation-domain concept. First-time
-customer identification (`app/domain/customers.py`,
-`find_or_create_customer`) resolves a name+contact into a `Customer` row
-with no account system — any channel can use it, not just chat. The chat
-UI itself (`static/chat/`, mounted at `/chat`) is a single static HTML
-file with inline CSS/JS — no framework, no build step, and no
-booking/availability logic; it only calls `POST /v1/requests`, `POST
-/v1/requests/{id}/reply`, and `POST /v1/requests/{id}/confirm`. Slot
-selection is button-based, not free-text-parsed — deterministic UI
-selection where a language-understanding step isn't needed.
-`app/api/rate_limit.py` adds a minimal in-memory per-IP limiter on the
-two AI-invoking public endpoints (real production rate limiting is
-Phase 10 hardening scope; this exists because Phase 4 is what first
-exposes a public, unauthenticated, AI-calling endpoint).
+| Component | Location | Role |
+|---|---|---|
+| API | `backend/app/api/` | FastAPI — thin HTTP layer; no booking/availability logic lives here |
+| Domain core | `backend/app/domain/` | Schema, deterministic availability engine, atomic booking, cancellation/reschedule, no-show predicate |
+| AI interpretation | `backend/app/ai/` | Provider-agnostic `Interpreter` Protocol; `providers/claude.py` (real) and `providers/fake.py` (tests, no network) |
+| Workflow orchestrator | `backend/app/workflow/` | The one module composing `domain` and `ai` — two state machines (`ProcessingRun`, `Appointment`), audit trail, notification/calendar dispatch |
+| Background jobs | `backend/app/worker.py`, `app/workflow/jobs.py` | Second process, 60s poll loop; reminders (`ScheduledJob`, row-locked) + periodic sweeps (no-shows, expiring runs) |
+| Notifications | `backend/app/workflow/notifications*.py` | `NotificationService` Protocol — console (dev default), mock (tests), Resend (real) |
+| Calendar | `backend/app/workflow/calendar.py` | `CalendarProvider` Protocol — `MockCalendarProvider` only; real Google Calendar adapter deferred |
+| Dashboard API | `backend/app/api/routes_dashboard.py` | Read-only endpoints assembled from existing audit/notification/job data — no new business logic |
+| Dashboard UI | `frontend/` | Next.js (App Router, TypeScript) — six-tab operator dashboard, thin typed API client, no framework beyond React |
+| Chat UI | `backend/static/chat/` | Single static HTML file, inline CSS/JS, no build step — the customer-facing entry point |
+| Persistence | `backend/alembic/`, PostgreSQL 16, SQLAlchemy 2.0 (async) | Every schema change is a reviewed migration |
+| CI | `.github/workflows/ci.yml` | Secret scan (gitleaks), backend lint + tests, frontend typecheck + lint + build, production image build check, opt-in AI golden-set eval |
 
-Verified live against the real API (kept minimal, per the same budget
-discipline as Phase 2): one full conversation exercised end to end
-through the actual browser UI — an initial message correctly resolved to
-a missing-service escalation, then a second conversation's ambiguous
-"no date given" case correctly triggered a clarifying question, a reply
-resolved it, real slots were offered, and a real booking was confirmed.
-`pytest` itself never calls the real API — all 47 tests use
-`FakeInterpreter` or small purpose-built stubs.
+## AI decides vs. deterministic code decides
 
-**Finding worth noting**: live testing surfaced that Phase 2's system
-prompt frames ambiguity around missing/vague *dates*, not around
-book-vs-question *intent* ambiguity — a message like "Can I come Friday?"
-resolved confidently to a booking request with no service mentioned
-(and correctly escalated for that reason) rather than being flagged as
-possibly-a-question. Also, the AI's `ambiguity_reason` field, reused
-directly as the clarifying question shown to the customer, reads like an
-internal diagnostic note rather than natural chat copy. Both are prompt/
-copy tuning opportunities for a follow-up, not defects in this phase's
-mechanism, which is verified working correctly end to end.
+| AI decides | Deterministic code decides |
+|---|---|
+| What the customer's message means (intent, service, date/time) | Whether a slot is actually available — a real Postgres constraint, not a model's belief |
+| Its own confidence in that interpretation | Whether confidence is high enough to act on — it never is; confidence is advisory-only, logged but never a gate |
+| The clarifying question to ask when ambiguous | How many clarification rounds are allowed (2, hard cap, then escalate) |
+| — | Whether a booking commits — a transactional check against live availability, re-validated even for a slot offered moments earlier |
+| — | Whether a no-show occurred (`now > end_at + grace_period`, a pure predicate) |
+| — | Whether a notification or calendar-sync failure blocks or reverses a committed appointment (never) |
+| — | Which appointment a cancel/reschedule request applies to — exactly one unambiguous match, or escalate; the system never guesses among several |
 
-Phase 5 detail: `app/workflow/calendar.py` adds the `CalendarProvider`
-Protocol (`create_event` / `update_event` / `cancel_event` — three
-methods, matching the architecture baseline's Section H spec exactly)
-and `MockCalendarProvider`, the only implementation for now — a real
-Google Calendar adapter is deliberately deferred pending a separate
-decision on credential configuration; nothing Google-specific exists
-anywhere in this codebase yet. `Appointment` gains `calendar_event_id`
-and `calendar_sync_status` (`PENDING`/`SYNCED`/`FAILED`, tracked
-independently of `AppointmentStatus` so a sync failure can never be
-confused with, or block, the booking itself). Sync is attempted
-synchronously right after a booking commits in `confirm_slot`, but a
-`CalendarProviderError` never invalidates the booking and never skips
-the customer's confirmation notification, which still fires regardless.
-Sync events reuse the existing `AuditEvent` table rather than a new one.
-`retry_calendar_sync` (plus `POST /v1/appointments/{id}/retry-calendar-
-sync`) is a manual, idempotent retry — not an automated sweep, which
-belongs with Phase 6's background-job infrastructure once it exists;
-retrying an already-`SYNCED` appointment is a harmless no-op that never
-even calls the provider. `app/domain/availability.py` and
-`app/domain/booking.py` are untouched — the calendar has no path back
-into availability or conflict-prevention logic. No live Anthropic calls
-in this phase's implementation.
+## Engineering decisions worth calling out
 
-Phase 6 detail: `app/workflow/jobs.py` splits background work into two
-shapes -- `ScheduledJob` (one-off, entity-specific: currently just
-`SEND_REMINDER`, claimed with `SELECT ... FOR UPDATE SKIP LOCKED` so more
-than one worker process can run safely) and plain periodic sweep
-functions for recurring maintenance (no-show detection, expiring
-abandoned runs), which don't need a row per run. `app/worker.py` is a
-second process running the same image on a 60s poll loop -- no Redis, no
-broker, coordinating purely through Postgres, per the standing
-instruction against unnecessary infrastructure; `POST
-/v1/jobs/run-tick` runs the same logic on demand. `app/domain/noshow.py`
-implements the deterministic no-show rule designed back in the
-architecture review (`now > end_at + grace_period → NO_SHOW`) as a pure
-predicate.
+- **AI sits at the unstructured-language boundary only.** Once a message is
+  interpreted, everything downstream — availability, booking, cancellation,
+  no-shows, escalation — is ordinary deterministic code with no model in the
+  loop.
+- **Booking is revalidated transactionally, not trusted from the offer.** A
+  slot shown to a customer a moment earlier is re-checked against real
+  database state at confirmation time; if a concurrent request took it, the
+  workflow re-offers fresh availability instead of failing outright.
+- **PostgreSQL — not application code — prevents overlapping appointments.**
+  A range-exclusion constraint on `appointments` is the actual guarantee,
+  proven with a real concurrent-request test, not just believed correct by
+  inspection.
+- **Calendar sync happens after the booking commits, and a sync failure
+  never unwinds it.** `calendar_sync_status` is tracked independently of the
+  appointment's own status so the two can never be confused.
+- **A notification failure doesn't roll back a committed appointment,
+  either.** The same discipline applies to email delivery as to calendar
+  sync — a `FAILED` notification is a recorded fact, not a reason to undo a
+  booking that already happened.
+- **Background work is a separate process, not inline in a request.** A
+  worker polls Postgres directly — reminders as claimed rows
+  (`SELECT ... FOR UPDATE SKIP LOCKED`, safe with more than one worker),
+  no-show detection as a periodic sweep. No Redis, no broker — nothing in
+  this system's scale needs one.
+- **No-show recovery creates a new appointment; it never mutates the
+  original.** The `NO_SHOW` record stays immutable evidence of what
+  happened; a successful rebooking is a new row linked back to it via
+  `rebooked_from_id`.
+- **Escalation is the correct outcome for real ambiguity, not a failure
+  mode.** An unmatched service, an ambiguous reschedule, or more than one
+  candidate appointment routes to a human queue — the system is designed to
+  know what it doesn't know, rather than guess and risk a wrong booking.
 
-The most novel piece: no-show recovery reuses Phase 4's clarification
-machinery almost entirely rather than duplicating it. A `ProcessingRun`
-gained a `kind` (`CUSTOMER_INITIATED`/`RECOVERY`) and
-`recovery_of_appointment_id`; a recovery run is created by the system
-(not a customer message), pre-fills `matched_service_id` from the missed
-appointment, and sits in `AWAITING_CLARIFICATION` waiting on a reply
-through the exact same `reply_to_clarification` / `POST /reply` path a
-clarifying question uses -- no parallel endpoint, no parallel state. One
-deliberate widening: a recovery run accepts `RESCHEDULE` intent as well
-as `BOOK` (an ordinary run still only accepts `BOOK` -- confirmed by
-test), since a customer replying "Thursday instead?" to a recovery
-message and a customer saying "book me for Thursday" mean the same thing
-here, whichever word the model reaches for. A successful rebooking sets
-the new `Appointment.rebooked_from_id`; the original stays immutably
-`NO_SHOW`. `app/domain/availability.py`, `app/domain/booking.py`,
-`app/workflow/calendar.py`, and `app/workflow/clarify.py` are all
-untouched — confirmed via `git diff --stat` showing zero changes to any
-of them. No live Anthropic calls in this phase's implementation.
+## Screenshots / demo
 
-Phase 7 detail: `app/domain/appointments.py` adds `cancel_appointment` and
-`reschedule_appointment`, the two mutations that act on an existing,
-already-BOOKED `Appointment` in place rather than creating a new one --
-rescheduling preserves the same row, same id, same history. Both share one
-policy predicate, `can_modify`, gated on a single new setting,
-`Business.min_reschedule_notice_hours` (cancellation and rescheduling
-share one notice-window knob, not two, since they ask the same "how much
-notice do we need" question). Rescheduling reuses `booking.py`'s two-layer
-concurrency discipline -- a deterministic availability re-check, backed by
-the real guarantee, the same Postgres exclusion constraint -- without
-duplicating `booking.py`'s insert path or touching it; the one shared
-change `availability.py` needed was an optional `exclude_appointment_id`,
-so a reschedule's re-check doesn't collide with the very row it's moving.
+The dashboard below is running against **synthetic demo data** — customers
+named Jamie Lee / Sam Park / Riley Chen at `@example.com`, seeded through
+the real chat/booking pipeline (not inserted directly into the database).
+It demonstrates the dashboard's visualization, not a re-proof of the real
+Resend integration (that was verified separately — see below). The
+appointment calendar is explicitly labeled **Demo / Mock Calendar** in the
+UI itself; there is no Google Calendar integration anywhere in this system.
 
-Resolving *which* appointment a cancel/reschedule request means is
-deliberately simple for the MVP, per the approved design: exactly one
-upcoming `BOOKED` appointment is acted on automatically; zero or several
-is a clean escalation, not a second clarification conversation -- the
-data model still allows a customer to have more than one appointment, this
-is only the automated flow declining to guess. `app/workflow/orchestrator.py`
-routes a confident (non-ambiguous) `CANCEL`/`RESCHEDULE` intent to this
-policy check; an *ambiguous* one still falls through to the same immediate
-escalation a confident unacceptable intent gets today -- Phase 7
-deliberately doesn't extend the bounded clarification loop to "which
-appointment" or "cancel vs. reschedule" uncertainty. A successful
-reschedule reuses the exact same slot-offering / `AWAITING_CONFIRMATION`
-machinery a fresh booking uses (a new `ProcessingRun.target_appointment_id`
-field tells `confirm_slot` to move the existing appointment instead of
-booking a new one); a successful cancellation is immediate and
-deterministic, with no offer/confirm step needed. Both call
-`CalendarProvider.update_event()` / `cancel_event()` (defined since Phase
-5, unused until now) with the same best-effort, never-blocking discipline
-as Phase 5's `create_event` sync -- a calendar failure is recorded and
-retryable, never a reason to undo a cancellation or reschedule that already
-committed in Postgres. A reschedule also moves the appointment's pending
-`SEND_REMINDER` job to the new time, so Phase 6's reminder doesn't fire
-against a start time that no longer exists. `app/domain/availability.py`'s
-one addition aside, `app/domain/booking.py` and `app/domain/noshow.py` are
-untouched. No live Anthropic calls in this phase's implementation.
+| Overview | Appointments (Demo / Mock Calendar) |
+|---|---|
+| ![Overview](docs/screenshots/dashboard-overview.png) | ![Appointments](docs/screenshots/dashboard-appointments.png) |
 
-Phase 8 detail: `app/workflow/notifications.py` gains `ConsoleNotificationProvider`
-(logs and persists, no credentials -- the new local-dev default) alongside
-the unchanged `NotificationService` Protocol and `MockNotificationProvider`
-tests use. The real vendor, Resend, lives in its own module,
-`app/workflow/notifications_resend.py` -- the only file that imports
-`httpx` for this, matching how `app/ai/providers/claude.py` is the only
-module that imports the Anthropic SDK. All three implementations share the
-same five-method Protocol; message content (subject/body per notification
-type) is composed once in `notifications.py` and reused by all three,
-rather than duplicated per provider. A new composition root,
-`app/workflow/notification_dependency.py`, reads `NOTIFICATION_PROVIDER`
-(`console` / `resend` / `mock`) and is now what both `routes_workflow.py`
-and `app/worker.py` depend on -- previously `app/worker.py` hardcoded
-`MockNotificationProvider()` directly, which would have silently defeated
-this phase for reminders and no-show recovery outreach (arguably the two
-most important notifications) had it been left as-is.
+| Customers | Notifications |
+|---|---|
+| ![Customers](docs/screenshots/dashboard-customers.png) | ![Notifications](docs/screenshots/dashboard-notifications.png) |
 
-`Customer.contact` has no channel marker (email vs. phone) by design since
-Phase 4, and Resend is email-only: rather than adding client-side
-validation, a contact that isn't a deliverable address is simply a send
-that fails. `ResendNotificationProvider` catches that -- any `httpx`
-error or non-2xx response -- internally and records the `Notification` as
-`FAILED` instead of raising, the same discipline `CalendarProviderError`
-handling uses for calendar sync: a failed send is recorded and never
-blocks or unwinds the appointment action that triggered it, and
-`NotificationStatus.FAILED` (unused since Phase 3) finally means
-something. This keeps every existing call site in `orchestrator.py` and
-`jobs.py` completely unchanged -- the failure handling lives entirely
-inside the provider, not at each of the five call sites. No manual retry
-endpoint for a failed notification yet (unlike calendar's
-`retry-calendar-sync`) -- deferred until an actual need shows up, per the
-same "keep scope focused" discipline as every other phase.
+| Jobs |
+|---|
+| ![Jobs](docs/screenshots/dashboard-jobs.png) |
 
-Not yet exercised against the real Resend API (no live credentials
-configured) -- same deliberate deferral as the real Google Calendar
-adapter in Phase 5. `ResendNotificationProvider` accepts an optional
-`httpx` transport for exactly this reason: tests inject an
-`httpx.MockTransport` to verify the success and failure paths without a
-real network call, and a real deployment can supply real credentials via
-`.env` (`RESEND_API_KEY`, `RESEND_FROM_EMAIL`) without any code changes.
-No live Anthropic calls in this phase's implementation.
+**Separately, and earlier in this project's development**, a real email was
+sent through the live Resend API for a real booking confirmation and
+confirmed delivered via the Resend dashboard — that verification exercised
+the actual `ResendNotificationProvider` code path shown as "Real" in the
+[Status](#status) table above. The screenshots above are a distinct,
+later demo run using the `console` notification provider, so they don't
+imply that particular data was ever emailed anywhere.
 
-Phase 9 detail: `frontend/` is a new Next.js (App Router, TypeScript) app --
-the first frontend infrastructure in this codebase beyond the framework-
-free chat UI. It's a single Client Component page (`app/page.tsx`)
-showing one business's escalation queue: reason, customer name/contact,
-the original message, and a Resolve action, talking directly to the
-existing `GET /v1/escalations` / `POST /v1/escalations/{id}/resolve`
-endpoints through a thin typed wrapper (`lib/api.ts`).
+## Technology stack
 
-No login exists anywhere in this system yet, and building one was
-explicitly out of scope for this phase -- Phase 10 added a per-business
-API key instead (see below), not full accounts/sessions. Given that, the
-dashboard trusts a `business_id` the same way the rest of the API already
-does -- entered by hand, persisted in the browser's `localStorage` for
-convenience across reloads. That surfaced a real, pre-existing gap rather
-than one this phase introduced: `GET /v1/escalations` had no business
-scoping at all before now -- any caller could see every business's
-escalation queue. Both endpoints now require `business_id` and filter/
-verify by it; resolving an escalation for the wrong business returns the
-same 404 as one that doesn't exist, rather than confirming which UUIDs
-are real for someone else's business. The list endpoint also gained a
-proper response shape (`EscalationQueueItemOut`, joined through
-`ProcessingRun` to `Customer`) -- the original `EscalationCaseOut` was
-just an opaque `processing_run_id` and a reason, not enough for a human
-to act on.
+FastAPI · PostgreSQL · SQLAlchemy 2.0 (async) · Alembic · Docker Compose ·
+GitHub Actions · Anthropic Claude · Next.js (App Router, TypeScript) · Resend
 
-`app/main.py` gained `CORSMiddleware`, scoped to the dashboard's origin
-only -- the first cross-origin browser client this API has ever had (the
-chat UI is same-origin, mounted directly into the FastAPI app). A new
-`dashboard` service in `docker-compose.yml` runs the Next.js dev server
-on port 3010, alongside `db`/`api`/`worker`, wired the same way: build
-context, volume-mounted source, no new infrastructure component beyond
-the one new container. No live Anthropic calls in this phase's
-implementation.
+## Project structure
 
-Phase 10 detail: the authorization gap Phase 9 partially closed for
-`/escalations` turned out to run through the *entire* domain API --
-every CRUD endpoint (`/services`, `/staff`, `/staff/{id}/services/{id}`,
-`/staff/{id}/working-hours`, `/customers`, direct `/appointments`
-creation) took a `business_id` with zero ownership check. `app/api/auth.py`
-adds a per-business API key: `POST /businesses` issues one at creation
-(shown in the response exactly once; only its SHA-256 hash is ever
-persisted -- a fast hash, deliberately, since this hashes a 256-bit
-random token rather than a human-chosen password, and a slow
-password-grade hash would buy nothing but latency here), and every
-business-scoped endpoint that isn't part of the customer-facing
-conversational flow now requires it as a Bearer token. A new
-`POST /businesses/{id}/rotate-api-key` handles both real rotation
-(requires the current key) and bootstrapping a business created before
-this column existed (one unauthenticated call allowed, only while no key
-is set). Deliberately not a full account/session system -- a business is
-the caller's identity here, the same shape Stripe or Twilio uses for a
-B2B API caller, not a human logging in; `GET /availability` (read-only,
-non-sensitive) and `POST /jobs/run-tick` (system-wide, not
-business-scoped -- a known gap this phase didn't extend the per-business
-model to cover) stay as they were. This was also the first HTTP-level
-test coverage `app/api/routes.py` has ever had.
+```
+backend/
+  app/
+    api/          HTTP layer — routes, auth, dashboard read endpoints
+    domain/        schema, availability engine, booking, cancel/reschedule, no-show
+    ai/             interpreter Protocol + Claude/fake providers
+    workflow/       orchestrator, state machines, notifications, calendar, jobs
+    core/           settings, startup checks
+    worker.py       background job process
+    static/chat/    customer-facing chat UI (static HTML/JS)
+  alembic/          database migrations
+  eval/             AI golden-set evaluation harness
+  tests/            pytest suite (isolated test database — see Testing)
+frontend/
+  app/              Next.js App Router entry (tab shell)
+  components/       dashboard tabs, detail panel, shared UI
+  lib/              typed API client, formatting helpers
+docs/
+  screenshots/      dashboard screenshots used above
+DEPLOYMENT.md        what running this in production shape actually involves
+```
 
-`eval/golden_set.yaml` grew from 26 to 33 cases, adding cancel/reschedule
-phrasings that didn't exist when the set was last touched, before Phase 7
-made either a real, automated action rather than an escalate-only intent
--- including the first case testing a genuine cancel/reschedule
-candidate-intents fork. Running it live surfaced two real findings, not
-just a clean pass: `eval/run_eval.py` crashed outright on a single
-malformed model response (the model occasionally leaks tool-call XML
-syntax into a field) instead of recording it as one failing case and
-continuing -- fixed, since production code already handles this
-exception gracefully and the eval harness should too. And three of the
-newly-added cases had inconsistent expectations with this same file's
-own existing precedent (`reschedule-no-target-date` already establishes
-that a request with no specifics is ambiguous, regardless of which of
-the two actions it names) -- corrected to match rather than re-verified
-with another live call. Four pre-existing cases also regressed on
-`is_ambiguous` against the current model, a real calibration-drift
-finding surfaced by actually running this rather than only expanding it;
-left as-is rather than adjusted blind, since deciding whether that's a
-prompt change or an updated expectation is a judgment call for a
-dedicated follow-up, not something to patch reflexively mid-phase.
-
-`backend/Dockerfile.prod` and `frontend/Dockerfile.prod` are the first
-production-shaped images in this repo -- no `--reload`/`next dev`, no
-bind-mounted source, both run as a non-root user. `docker-compose.prod.yml`
-wires them together with no host port published for `db` and every
-credential required from the environment rather than defaulted.
-`app/core/startup_checks.py` refuses to boot when `APP_ENV=production`
-and a dev-only default is still in place (`SECRET_KEY`, the placeholder
-DB password, an unset `ANTHROPIC_API_KEY`, `NOTIFICATION_PROVIDER=resend`
-missing its credentials) -- every problem reported at once, at process
-start, rather than surfacing later as a confusing runtime error on the
-first real request. See `DEPLOYMENT.md` for what running this in
-production actually involves, including what's deliberately not
-included (a real host, TLS, a managed database, CI/CD to a registry).
-
-## Stack
-
-FastAPI · PostgreSQL · SQLAlchemy (async) · Alembic · Docker Compose ·
-GitHub Actions · Anthropic Claude (Phase 2+) · Next.js (Phase 9+)
-
-## Local development
+## Setup / local development
 
 ```bash
-cp .env.example .env   # already done if you cloned this repo fresh — fill in real values later
+cp .env.example .env   # fill in real values — see Environment variables below
 docker compose up --build
 ```
 
-The API comes up at `http://localhost:8010` (mapped off the default 8000/5432
-to avoid clashing with other local projects — see `docker-compose.yml`);
-`GET /health` checks both the process and the database connection. Postgres
-itself is reachable from the host at `localhost:5436` if you need to inspect
-it directly (e.g. with `psql`). The business dashboard comes up at
-`http://localhost:3010` — enter a `business_id` (from `POST /v1/businesses`)
-to see that business's escalation queue.
+- API: `http://localhost:8010` (mapped off the default 8000 to avoid
+  clashing with other local projects) — `GET /health` checks the process
+  and the database connection.
+- Postgres: reachable from the host at `localhost:5436` if you want to
+  inspect it directly.
+- Dashboard: `http://localhost:3010` — enter a `business_id` (from
+  `POST /v1/businesses`) and its API key to see that business's data.
+- Chat UI: `http://localhost:8010/chat`.
 
 Running the frontend directly (outside Docker):
 
@@ -393,22 +252,145 @@ ruff check .
 black --check .
 ```
 
-Running the AI golden-set eval (needs a real `ANTHROPIC_API_KEY` in `.env`,
-costs a small amount of real API usage, not run as part of `pytest`):
+Running the AI golden-set eval (needs a real `ANTHROPIC_API_KEY`, costs a
+small amount of real API usage, not run as part of `pytest`):
 
 ```bash
 cd backend
 python -m eval.run_eval
 ```
 
+## Environment variables
+
+Every variable the system uses lives in `.env.example` (placeholders only)
+with an inline comment on where it's introduced:
+
+| Variable | Required for | Notes |
+|---|---|---|
+| `DATABASE_URL` | Everything | Async Postgres URL |
+| `SECRET_KEY` | Production only | Refused at boot if left at the dev default when `APP_ENV=production` |
+| `ANTHROPIC_API_KEY`, `AI_MODEL` | AI interpretation | Required in production; local dev can run entirely on `FakeInterpreter` in tests |
+| `CALENDAR_PROVIDER` | Calendar sync | Only `mock` exists today |
+| `NOTIFICATION_PROVIDER` | Notifications | `console` (dev default, no credentials), `resend` (real email), `mock` (tests) |
+| `RESEND_API_KEY`, `RESEND_FROM_EMAIL` | Real email delivery | Only needed if `NOTIFICATION_PROVIDER=resend` |
+| `DASHBOARD_ORIGIN` | CORS | The dashboard's origin, for the API's CORS allow-list |
+| `POSTGRES_PASSWORD`, `API_PUBLIC_URL` | Production only | Unused locally — see `DEPLOYMENT.md` |
+
+## Testing
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest
+```
+
+**161/161 tests passing**, entirely against an isolated database that is
+never the one the local dev stack uses.
+
+### The incident, and the fix
+
+While building the operator dashboard, `pytest` was run once against the
+same database the whole local demo stack was using. Its autouse
+table-cleanup fixture deleted every row in every table — the seeded
+business, customers, appointments, escalations, and notifications built up
+over an entire manual demo session, including a real, live-verified Resend
+email send, were gone. It was disclosed immediately, root-caused, and fixed
+at its actual source rather than patched around:
+
+- `TEST_DATABASE_URL` is derived from the app's own `DATABASE_URL` by
+  suffixing `_test` onto the database name, with a hard `assert` that it
+  can never equal the app's real URL.
+- The test database is auto-provisioned if it doesn't exist yet (a direct
+  `asyncpg` connection to Postgres's own `postgres` maintenance database).
+- The deeper root cause: FastAPI's `get_db` dependency was bound to a
+  module-level engine built from the *real* `DATABASE_URL` at import time —
+  so HTTP-level tests (`ASGITransport`) were bypassing the test-database
+  fixtures entirely and hitting the real database regardless of what the
+  lower-level fixtures pointed at. A global `app.dependency_overrides[get_db]`
+  override, applied for the whole test session, closes that gap.
+- `tests/test_database_isolation.py` is a permanent regression test — it
+  asserts the test database is never the app's own database, and that a
+  query made through the `db` fixture is actually answered by Postgres from
+  the `_test`-suffixed database, not just configured to be.
+
+The invariant this enforces: **running `pytest` must never be capable of
+deleting or modifying the development/demo database.** Verified concretely
+(not just by inspection) by planting a canary row in the real dev database,
+running the full suite, and confirming the row survived — done three times
+across this fix's development, and once more as part of this repository's
+own pre-publish verification (see [Security](#security)).
+
 ## Security
 
-- `.env` is gitignored; only `.env.example` (placeholders only) is committed.
-- Secret scanning runs in CI (`gitleaks`) and locally via `pre-commit`:
-  ```bash
-  pip install pre-commit
-  pre-commit install
-  ```
-- No real credentials belong in code, tests, seed data, or documentation —
-  see `.env.example` for every credential the system uses and where it's
-  introduced in the phase plan.
+- **Authentication** — per-business API key (`Authorization: Bearer`,
+  SHA-256 hashed at rest), required on every business-scoped endpoint
+  except the two documented exceptions below.
+- **Secrets** — `.env` is gitignored; only `.env.example` (placeholders
+  only) is committed. No credential is ever read from a committed file.
+- **Secret scanning** — `gitleaks` runs in CI on every push, and locally
+  via `pre-commit` (`pip install pre-commit && pre-commit install`).
+- **Before making this repository public**, both the working tree and the
+  full git history (every commit, not just the latest) were scanned with
+  `gitleaks` and cross-checked with a manual grep for the specific
+  Anthropic/Resend/API-key values used during development. Result: no
+  secrets found anywhere in the repository or its history. The dashboard
+  screenshots above show a masked API-key field and synthetic demo data
+  only.
+- **Notification/calendar failures are recorded, never silently retried
+  with credentials re-sent or swallowed** — see
+  [Engineering decisions](#engineering-decisions-worth-calling-out).
+- **CORS** is scoped to the dashboard's own origin, not wildcarded.
+- **Production startup check** (`app/core/startup_checks.py`) refuses to
+  boot with `APP_ENV=production` if `SECRET_KEY`/`DASHBOARD_ORIGIN` are
+  still dev defaults, the database password is still the dev placeholder,
+  `ANTHROPIC_API_KEY` is unset, or `NOTIFICATION_PROVIDER=resend` is
+  missing its credentials — every problem reported at once, at process
+  start.
+
+## Known limitations
+
+Presented honestly, not as a hidden gap list:
+
+- **Two endpoints remain unauthenticated by design-gap, not oversight:**
+  `POST /v1/interpret` (a direct AI-interpretation endpoint, rate-limited
+  but not API-key gated) and `POST /v1/jobs/run-tick` (triggers the
+  background sweep on demand, system-wide rather than business-scoped).
+  Both are known, documented gaps in the per-business API-key model
+  introduced in Phase 10 — not something this project claims is closed.
+- **No pagination** on any list endpoint (appointments, customers,
+  notifications, jobs, activity). Fine at this project's demo scale;
+  a real production deployment with meaningful data volume would need it
+  before the dashboard's list views stay usable.
+- **No real calendar integration.** `MockCalendarProvider` is the only
+  implementation of `CalendarProvider`. A Google Calendar adapter would be
+  new code behind the existing Protocol, not a redesign — deliberately not
+  built, since it needs its own decision on credential/OAuth handling.
+- **Not deployed to a live URL.** Runs via Docker Compose (dev and prod
+  shapes both exist — see `DEPLOYMENT.md`); no hosting, TLS, managed
+  database, or CI/CD-to-a-registry is included. This project's subject is
+  the automation/workflow layer, not infrastructure hosting.
+- **Rate limiting is in-memory, single-process** — correct for a
+  single-instance deployment; a shared store would be the change needed
+  behind multiple API workers.
+- **This system is not described as "production-ready" anywhere in this
+  repository**, including here. It's a portfolio-quality demonstration of
+  a real automation architecture, verified end to end, with its actual
+  gaps named rather than glossed over.
+
+## Future work
+
+- Real Google Calendar adapter behind the existing `CalendarProvider`
+  Protocol.
+- API-key gating for `/interpret` and a business scope for
+  `/jobs/run-tick`.
+- Pagination on dashboard list endpoints.
+- A managed-Postgres / real-hosting deployment target, building on
+  `DEPLOYMENT.md`'s production-shaped images.
+
+## Development history
+
+The phase-by-phase implementation log — what each of the 11 development
+phases actually built, what was verified live vs. deterministically tested,
+and the specific findings and trade-offs made along the way — is preserved
+in **[`docs/PHASES.md`](docs/PHASES.md)** for anyone who wants the full
+detail behind the summary above.
