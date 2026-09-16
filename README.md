@@ -109,7 +109,7 @@ escalation queue instead of guessing — visible on the operator dashboard.
 | Dashboard UI | `frontend/` | Next.js (App Router, TypeScript) — six-tab operator dashboard, thin typed API client, no framework beyond React |
 | Chat UI | `backend/static/chat/` | Single static HTML file, inline CSS/JS, no build step — the customer-facing entry point |
 | Persistence | `backend/alembic/`, PostgreSQL 16, SQLAlchemy 2.0 (async) | Every schema change is a reviewed migration |
-| CI | `.github/workflows/ci.yml` | Secret scan (gitleaks), backend lint + tests, frontend typecheck + lint + build, production image build check, opt-in AI golden-set eval |
+| CI | `.github/workflows/ci.yml` | Secret scan (gitleaks), backend lint + tests, frontend typecheck + lint + build, production image build check |
 
 ## AI decides vs. deterministic code decides
 
