@@ -84,6 +84,11 @@ async def test_first_time_customer_chat_and_clarification_via_http(
 
 @pytest.mark.asyncio
 async def test_missing_customer_identity_is_rejected(business: Business) -> None:
+    # FakeInterpreter, like every other test here -- identity is checked
+    # after interpretation (see app/workflow/orchestrator.py), so this
+    # route still resolves get_interpreter via DI before the 422 fires.
+    app.dependency_overrides[get_interpreter] = lambda: FakeInterpreter()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
